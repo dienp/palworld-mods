@@ -1,0 +1,11 @@
+{
+  "SchemaVersion": 1,
+  "ModName": "Distinct Base Icons",
+  "PackageName": "DistinctBaseIcons",
+  "ModType": "Paks",
+  "GamePath": "",
+  "RepakPath": "tools/repak/repak.exe",
+  "StagingPath": "work/staging",
+  "DistPath": "dist",
+  "WorkshopItemId": null
+}

@@ -1,0 +1,21 @@
+{
+  "name": "scatterspam-capture",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "root": "packages/ScatterspamCapture",
+  "targets": {
+    "validate": {
+      "command": "node ../../scripts/validate-mods.mjs .",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    },
+    "build": {
+      "command": "dotnet build src/ScatterspamCapture.AssetTool/ScatterspamCapture.AssetTool.csproj --configuration Release",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    }
+  },
+  "tags": ["type:mod", "format:lua"]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "deep-salvage",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "root": "packages/DeepSalvage",
+  "targets": {
+    "validate": {
+      "command": "node ../../scripts/validate-mods.mjs .",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    }
+  },
+  "tags": ["type:mod", "format:lua", "runtime:server"]
+}

@@ -1,0 +1,16 @@
+[h1]Scatterspam Capture[/h1]
+
+[b]Load your Scatter Sphere Launcher—because it was never really 0%.[/b]
+
+Tired of tiny capture chances getting rounded away? This mod shows rates below
+1% with three decimals, so 0.006% stays 0.006%.
+
+It also hides the message that floods your screen during sphere spam:
+
+[quote]This Sphere isn't working on [Pal name][/quote]
+
+Your actual capture chance stays unchanged.
+
+Requires
+[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3625223587]UE4SS
+Experimental (Palworld)[/url].

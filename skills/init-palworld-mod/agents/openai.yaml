@@ -1,0 +1,4 @@
+interface:
+  display_name: "Initialize Palworld Mod"
+  short_description: "Validate, scaffold, and optimize Palworld mods safely"
+  default_prompt: "Use $init-palworld-mod to validate the architecture and performance implications, then initialize a debug-ready Palworld 1.0 mod project."

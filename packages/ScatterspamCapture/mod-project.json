@@ -1,0 +1,11 @@
+﻿{
+    "SchemaVersion":  1,
+    "ModName":  "Scatterspam Capture",
+    "PackageName":  "ScatterspamCapture",
+    "ModType":  "Lua",
+    "GamePath":  "",
+    "RepakPath":  "tools/repak/repak.exe",
+    "StagingPath":  "work/staging",
+    "DistPath":  "dist",
+    "WorkshopItemId":  "3770359988"
+}

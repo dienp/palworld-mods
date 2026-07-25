@@ -1,0 +1,25 @@
+﻿{
+    "ModName":  "Deep Salvage",
+    "PackageName":  "DeepSalvage",
+    "Thumbnail":  "thumbnail.png",
+    "Version":  "0.1.0-dev.9",
+    "DebugMode":  true,
+    "MinRevision":  82182,
+    "Author":  "ptd",
+    "Dependencies":  [
+
+                     ],
+    "Tags":  [
+                 "Gameplay",
+                 "Tweaks"
+             ],
+    "InstallRule":  [
+                        {
+                            "Type":  "Lua",
+                            "IsServer":  true,
+                            "Targets":  [
+                                            "./Scripts/"
+                                        ]
+                        }
+                    ]
+}

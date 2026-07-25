@@ -1,0 +1,15 @@
+{
+  "name": "init-palworld-mod",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "root": "skills/init-palworld-mod",
+  "targets": {
+    "validate": {
+      "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"if (-not (Test-Path SKILL.md) -or -not (Test-Path scripts/init-palworld-mod.ps1)) { throw 'Skill files are incomplete' }\"",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    }
+  },
+  "tags": ["type:skill"]
+}

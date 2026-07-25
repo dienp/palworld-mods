@@ -1,0 +1,24 @@
+﻿{
+    "ModName":  "Scatterspam Capture",
+    "PackageName":  "ScatterspamCapture",
+    "Thumbnail":  "thumbnail.png",
+    "Version":  "1.0.0",
+    "DebugMode":  false,
+    "MinRevision":  82182,
+    "Author":  "ptd",
+    "Dependencies":  [
+
+                     ],
+    "Tags":  [
+                 "User Interface",
+                 "Utilities"
+             ],
+    "InstallRule":  [
+                        {
+                            "Type":  "Lua",
+                            "Targets":  [
+                                            "./Scripts/"
+                                        ]
+                        }
+                    ]
+}

@@ -1,0 +1,11 @@
+﻿{
+    "SchemaVersion":  1,
+    "ModName":  "Visible Fishing Salvage Spots",
+    "PackageName":  "VisibleFishingSalvageSpots",
+    "ModType":  "Paks",
+    "GamePath":  "",
+    "RepakPath":  "tools/repak/repak.exe",
+    "StagingPath":  "work/staging",
+    "DistPath":  "dist",
+    "WorkshopItemId":  null
+}

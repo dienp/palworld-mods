@@ -1,0 +1,21 @@
+{
+  "ModName": "Distinct Base Icons (Development)",
+  "PackageName": "DistinctBaseIcons",
+  "Thumbnail": "thumbnail.png",
+  "Version": "0.1.0-dev.6",
+  "DebugMode": true,
+  "MinRevision": 619,
+  "Author": "ptd",
+  "Dependencies": [],
+  "Tags": [
+    "User Interface"
+  ],
+  "InstallRule": [
+    {
+      "Type": "Paks",
+      "Targets": [
+        "./Paks/"
+      ]
+    }
+  ]
+}

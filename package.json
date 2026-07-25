@@ -1,0 +1,20 @@
+{
+  "name": "palworld-mods",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nx monorepo for Palworld mods and modding automation.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "graph": "nx graph",
+    "validate": "nx run-many -t validate",
+    "build": "nx run-many -t build",
+    "format:check": "nx format:check"
+  },
+  "devDependencies": {
+    "nx": "23.1.0"
+  },
+  "packageManager": "npm@11.16.0"
+}

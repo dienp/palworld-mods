@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "defaultBase": "main",
+  "namedInputs": {
+    "default": [
+      "{projectRoot}/**/*",
+      "sharedGlobals"
+    ],
+    "sharedGlobals": [
+      "{workspaceRoot}/scripts/**/*",
+      "{workspaceRoot}/AGENTS.md"
+    ]
+  },
+  "targetDefaults": {
+    "validate": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ]
+    },
+    "build": {
+      "cache": true,
+      "inputs": [
+        "default"
+      ],
+      "outputs": [
+        "{projectRoot}/src/**/bin"
+      ]
+    }
+  }
+}

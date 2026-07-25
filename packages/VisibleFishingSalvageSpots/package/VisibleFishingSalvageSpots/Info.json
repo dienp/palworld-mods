@@ -1,0 +1,23 @@
+﻿{
+    "ModName":  "Visible Fishing Salvage Spots",
+    "PackageName":  "VisibleFishingSalvageSpots",
+    "Thumbnail":  "thumbnail.png",
+    "Version":  "1.0.0",
+    "DebugMode":  false,
+    "MinRevision":  619,
+    "Author":  "ptd",
+    "Dependencies":  [
+
+                     ],
+    "Tags":  [
+                 "Utilities"
+             ],
+    "InstallRule":  [
+                        {
+                            "Type":  "Paks",
+                            "Targets":  [
+                                            "./Paks/"
+                                        ]
+                        }
+                    ]
+}

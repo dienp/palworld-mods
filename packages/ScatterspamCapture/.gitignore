@@ -1,0 +1,12 @@
+﻿tools/
+work/original/
+work/staging/
+dist/*
+!dist/.gitkeep
+release/*
+!release/WorkshopDescription.txt
+!release/ReleaseChecklist.md
+!release/SHA256SUMS.txt
+!release/WorkshopMedia/
+!release/WorkshopMedia/**
+*.pak.disabled

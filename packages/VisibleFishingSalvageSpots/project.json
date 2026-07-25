@@ -1,0 +1,21 @@
+{
+  "name": "visible-fishing-salvage-spots",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "root": "packages/VisibleFishingSalvageSpots",
+  "targets": {
+    "validate": {
+      "command": "node ../../scripts/validate-mods.mjs .",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    },
+    "build": {
+      "command": "dotnet build src/VisibleFishingSalvageSpots.AssetTool/VisibleFishingSalvageSpots.AssetTool.csproj --configuration Release",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    }
+  },
+  "tags": ["type:mod", "format:paks"]
+}

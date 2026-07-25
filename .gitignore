@@ -1,0 +1,27 @@
+node_modules/
+.nx/
+
+# .NET build output
+**/bin/
+**/obj/
+*.user
+
+# Local game/tool state and extracted copyrighted assets
+**/work/
+**/dist/
+backups/
+Output/
+PMK/
+tools/*
+!tools/.gitkeep
+
+# Machine-local configuration
+*.local.json
+.env
+.env.*
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
