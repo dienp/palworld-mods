@@ -8,13 +8,14 @@ Can a mod give an expert player a fast, consolidated view of base health,
 including production, unhealthy workers, power, and completed expeditions?
 
 **Yes, with qualifications.** Palworld modding can inspect live Unreal objects,
-add UI, and read or derive the requested signals. The practical route is a
-runtime mod on every authoritative host/server plus a client UI component. It
-is not currently a small data-only pak, and Palworld's documented dedicated
-server REST API is not a base-management API. A useful first version is
-feasible; a stable, universally installable dashboard requires runtime
-reflection research, multiplayer authority handling, and maintenance when game
-updates rename or reshape internal classes.
+add UI, and read or derive some of the requested signals. The product should aim
+to run entirely on the player's client, with no required server-side component.
+Version 0 must therefore establish which operational values already replicate
+to an ordinary client and how trustworthy they remain when a base is streamed
+out. It is not currently a small data-only pak, and Palworld's documented
+dedicated-server REST API is not a base-management API. A useful client-only
+version is feasible if enough state is replicated; otherwise the product must
+narrow its claims instead of introducing a mandatory server component.
 
 No source found establishes a supported public API for every requested metric.
 Accordingly, this note separates directly observable values from derived
@@ -34,7 +35,7 @@ probe rather than guessing them.
 | Production rate and utilization | Medium | Delta sampling of accumulated work/output, correlated with assigned workers and uptime | A displayed rate should say whether it is instantaneous, rolling observed throughput, or a theoretical estimate. |
 | Resource inventory and shortages | Medium-high | Base storage/container inventories and recipe requirements | Scanning every container every frame is too expensive; cache and refresh slowly or on relevant events. |
 | Expedition running/completed/claimable | Medium-high | Expedition facility or subsystem state and reward/claim state | Exact model, authority, and persistence behavior must be confirmed on the current game build. |
-| Cross-base overview from anywhere | Medium | Server-side persistent models, replicated summary, or an explicit server-to-client bridge | Client-only world scans cannot reliably see streamed-out bases. |
+| Cross-base overview from anywhere | Unknown until Version 0 | Client-visible persistent models or already-replicated summaries | No custom server bridge is allowed in the baseline; remote values may be stale or unavailable. |
 | Historical trends and alerts | High once collection works | Mod-owned time-series samples and rules | Keep history out of the game save unless persistence compatibility is proven. |
 
 ## What the available mod surfaces mean
@@ -85,30 +86,111 @@ optional companion, not the live dashboard's core.
 
 ## Recommended product scope
 
-### Version 0: read-only telemetry probe
+### Version 0: client-only read-only telemetry probe
 
-Do not begin with a full widget. Build a development-only UE4SS Lua probe that:
+#### Goal
 
-1. Resolves the local player's guild and enumerates only its base models.
-2. Dumps class names and a strict allowlist of candidate properties once.
-3. Records whether each value exists on client, listen-server host, and
-   dedicated server.
-4. Samples candidate counters every 5 seconds and writes structured diagnostic
-   output with a session/build identifier.
-5. Performs no state mutation, no save writes, and no per-frame world scan.
+Do not begin with a full widget. Build a development-only UE4SS Lua probe that
+runs on an ordinary player's client and answers one product-defining question:
+
+> What trustworthy base-operation data is already available to a client without
+> installing code on the host or dedicated server?
+
+The probe must not depend on a custom server-to-client bridge. A listen-server
+host can be used as a comparison environment, but host-only access does not
+count as proof that the client-only product works.
+
+#### Probe behavior
+
+The probe should:
+
+1. Resolve the local player's guild and enumerate only client-visible base
+   models belonging to that guild.
+2. Dump reflected class names and a strict allowlist of candidate properties
+   once per game build.
+3. Join persistent IDs where available; never use display names, proximity, or
+   raw object addresses as durable identity.
+4. Sample candidate counters every 5 seconds and write structured JSON Lines
+   with a session ID, game build, timestamp, network role, base-loaded state,
+   source object, and observation age.
+5. Compare observations while inside the base, outside render distance, after
+   fast travel, after dungeon entry/exit, and after reconnect.
+6. Mark each value as reliable, loaded-only, cached, derivable, or unavailable.
+7. Perform no state mutation, no save writes, no network commands, and no
+   per-frame world scan.
+
+#### Expected diagnostic output
+
+Each sample should contain enough provenance to distinguish live replicated
+truth from an old client observation:
+
+```json
+{
+  "schemaVersion": 1,
+  "sessionId": "20260726-001",
+  "gameBuild": "current-build-id",
+  "timestamp": "2026-07-26T01:30:05+07:00",
+  "networkRole": "dedicated-client",
+  "guildId": "stable-guild-id",
+  "base": {
+    "id": "stable-base-id",
+    "loaded": false,
+    "lastLoadedAt": "2026-07-26T01:26:10+07:00"
+  },
+  "observations": [
+    {
+      "metric": "worker.rosterCount",
+      "value": 28,
+      "sourceClass": "ReflectedClassName",
+      "sourceProperty": "ReflectedPropertyName",
+      "classification": "cached",
+      "observedAt": "2026-07-26T01:26:10+07:00",
+      "ageSeconds": 235,
+      "matchesVanillaUi": true
+    }
+  ]
+}
+```
+
+The repository output for Version 0 should include:
+
+- the reproducible UE4SS probe source;
+- timestamped JSONL samples for each supported test mode, kept out of Git when
+  they contain machine- or session-specific data;
+- a sanitized capability matrix mapping every requested metric to its source,
+  authority, streaming behavior, confidence, and classification;
+- evidence notes comparing samples with vanilla UI and direct observation;
+- sampling cost measurements with several full bases; and
+- a go/no-go recommendation for the client-only Version 1 dashboard.
+
+#### Classification rules
+
+| Classification | Required evidence | Product treatment |
+| --- | --- | --- |
+| Reliable | Accurate on an ordinary client while loaded and streamed out, including after reconnect | May be shown as current with observation time. |
+| Loaded-only | Accurate only while the base or relevant actor is streamed in | Show only as live for loaded bases. |
+| Cached | Remains visible after streaming but does not reliably refresh | Show last-observed value, timestamp, and age. |
+| Derivable | Can be calculated from repeated trustworthy client observations | Label the sampling window and derivation. |
+| Unavailable | Not exposed or not trustworthy on an ordinary client | Exclude from the client-only product. |
+
+#### Research questions
 
 The first proof should answer these questions on the current Palworld build:
 
-- Can an authoritative process enumerate all guild bases when their areas are
-  streamed out?
-- Does a persistent roster expose worker condition and assigned task, or must
-  live worker actors be joined to persistent Pal records?
-- Which facility model owns queue progress, completed output, and blocking
-  reasons?
-- Is electricity stored centrally per base, per network, or per facility?
-- Where does expedition status persist, and what exactly marks a reward as
-  completed versus claimed?
-- Which objects replicate to an ordinary remote client?
+- Can an ordinary remote client enumerate all of its guild's bases when their
+  areas are streamed out?
+- Does a persistent client-visible roster expose worker condition and assigned
+  task, or must live worker actors be joined to persistent Pal records?
+- Which production queue fields replicate, and do they continue updating while
+  the facility is streamed out?
+- Are electricity storage, generation, and consumption available per base,
+  network, or facility on the client?
+- Does expedition state replicate, including the distinction between running,
+  completed, claimable, and claimed?
+- Which client values survive fast travel, dungeon transitions, reconnects,
+  and server restarts, and which are merely stale cached observations?
+- Can guild ownership be verified from replicated IDs without proximity-based
+  guesses or disclosure of another guild's state?
 
 ### Version 1: minimum useful dashboard
 
@@ -150,9 +232,8 @@ night behavior, transport delays, and game difficulty settings.
 ## Proposed architecture
 
 ```text
-authoritative collector (server/host)
-  -> normalized, read-only base snapshots
-  -> throttled transport/replication bridge
+client-side collector
+  -> normalized observations with freshness/classification
   -> local client cache
   -> cooked UMG dashboard
   -> optional local-only history/export
@@ -163,12 +244,12 @@ the game exposes them. Never use display names or raw object addresses as
 persistent identity. Each snapshot should carry the game build, schema version,
 collection time, authority source, and loaded/stale flags.
 
-For single player, collector and UI coexist in one process. For a listen server,
-the host remains authoritative. For a dedicated server, install the collector
-server-side and the UI on participating clients; otherwise limit the feature to
-data already replicated to the client and clearly document the gaps. Any custom
-network bridge needs bounds checking, guild authorization, rate limiting, and
-no mutation commands.
+For single player, collector and UI coexist in one process. On a listen or
+dedicated server, the baseline product remains client-only and is limited to
+state already replicated to the participating client. Clearly document
+missing, loaded-only, and cached values. A server-side collector or custom
+network bridge is outside the product target and must not become an implicit
+installation requirement.
 
 ## Performance and safety constraints
 
@@ -188,23 +269,26 @@ no mutation commands.
 
 ## Feasibility gates and stop conditions
 
-Proceed to a UI prototype only when a probe demonstrates all of the following:
+Proceed to a client-only UI prototype only when an ordinary remote client
+demonstrates all of the following:
 
-1. One stable base identity joins roster, facilities, electricity, and
-   expeditions without proximity-only guesses.
-2. Health/condition values agree with vanilla UI for at least healthy, hungry,
-   low-SAN, injured/ailment, sleeping, and incapacitated cases.
-3. Queue progress and completion agree with vanilla facilities across world
-   travel and server restart.
-4. A remote multiplayer client sees only its authorized guild snapshot.
-5. Sampling with multiple max-size bases creates no visible frame or server
-   tick regression.
+1. Stable IDs join enough of the client-visible roster, facilities, power, and
+   expedition state to create useful base cards without proximity-only guesses.
+2. Every displayed condition agrees with vanilla UI or direct observation and
+   has a documented classification.
+3. Loaded-only and cached values are detected and cannot be mistaken for live
+   streamed-out state.
+4. The client can verify guild ownership and does not expose another guild's
+   operational state.
+5. Sampling with multiple max-size bases creates no visible client frame
+   regression.
 
 If streamed-out base models do not retain operational state, narrow the product
-claim to “loaded base inspector” rather than silently estimating. If current
-Workshop rules cannot carry the required runtime component, distribute only
-through an explicitly documented UE4SS installation path; do not label the pak
-as standalone.
+claim to “loaded base inspector with last-observed summaries.” If too few
+useful metrics replicate, stop the dashboard rather than adding a required
+server component. If current Workshop rules cannot carry the required runtime
+component, distribute only through an explicitly documented client-side UE4SS
+installation path; do not label the pak as standalone.
 
 ## Test plan
 
@@ -231,12 +315,14 @@ collector loaded.
 
 ## Decision
 
-This concept is viable enough to prototype. The strongest differentiator is
-not merely showing existing numbers; it is trustworthy cross-base triage and
-honest observed-rate analytics. Start with the runtime telemetry probe and a
-small alert dashboard. Defer optimization recommendations and long-term history
-until authoritative field ownership, expedition persistence, and rate formulas
-are measured on the current build.
+This concept is viable enough for a client-only discovery prototype. Version 0
+must determine the boundary of replicated client state before any dashboard is
+promised. The strongest differentiator is not merely showing existing numbers;
+it is honest cross-base triage that distinguishes live, loaded-only, cached,
+derived, and unavailable information. Start with the client-side telemetry
+probe. Defer the dashboard, optimization recommendations, and long-term history
+until the replicated fields, streaming behavior, expedition visibility, and
+rate formulas are measured on the current build.
 
 ## Sources and confidence
 
