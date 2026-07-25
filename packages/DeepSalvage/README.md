@@ -50,6 +50,12 @@ It deliberately does not register the unsafe interaction hooks. The next gate
 is a minimal native-component proof that creates `Interact2` and receives its
 callback without invoking Lua from the indicator-query hot path.
 
+The first native gate is implemented in [`native-proof/`](native-proof/). It
+uses a UE4SS C++ post-hook to avoid Lua parameter marshalling, copies the
+vanilla action metadata into `Interact2`, and logs the native
+`StartTriggerInteract(Interact2)` callback. It is source-only until it passes
+live client testing; no proof DLL is included in the Workshop payload.
+
 ## Layout
 
 - `docs/` — research and test records
