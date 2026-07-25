@@ -1,5 +1,5 @@
 local MOD_NAME = "DeepSalvage"
-local MOD_VERSION = "0.1.0-dev.9"
+local MOD_VERSION = "0.1.0-dev.16"
 
 local CONFIG = {
     magnet_item_id = "Salvage_TreasureBoxKey01",
@@ -20,6 +20,10 @@ local MESSAGE_PREFIX = "__DEEP_SALVAGE__"
 local START_PREFIX = MESSAGE_PREFIX .. "START|"
 
 local PATHS = {
+    get_indicator_info =
+        "/Script/Pal.PalInteractiveObjectComponentInterface:GetIndicatorInfo",
+    get_indicator_text =
+        "/Script/Pal.PalInteractiveObjectComponentInterface:GetIndicatorText",
     trigger_interact = "/Script/Pal.PalInteractComponent:StartTriggerInteract",
     chat_receive = "/Script/Pal.PalPlayerController:EnterChat_Receive",
     request_open =
@@ -46,9 +50,12 @@ local server_selections_by_player = {}
 local server_attempts_by_model = {}
 local local_deep_model_budget = 0
 local salvage_object_cache = setmetatable({}, {__mode = "k"})
+local indicator_patch_status = setmetatable({}, {__mode = "k"})
 local cached_log_manager = nil
 local last_notification_by_event = {}
 local performance = {
+    indicator_checks = 0,
+    indicator_mutations = 0,
     selection_checks = 0,
     salvage_cache_hits = 0,
     salvage_cache_misses = 0,
@@ -204,7 +211,9 @@ local function now_ms()
     return os.time() * 1000
 end
 
-local function enum_number(value)
+local enum_number
+
+enum_number = function(value)
     value = unwrap(value)
     if type(value) == "number" then
         return value
@@ -298,6 +307,74 @@ local function is_salvage_object(object)
         string.find(owner_name, "FishingJunkSpot", 1, true) ~= nil
     salvage_object_cache[target] = is_salvage
     return is_salvage
+end
+
+local function on_get_indicator_info(
+    interactive_object,
+    action_info,
+    situation_info
+)
+    local component = unwrap(interactive_object)
+    performance.indicator_checks = performance.indicator_checks + 1
+    if not is_salvage_object(component) then
+        return
+    end
+
+    -- ActionInfo is an out parameter owned by this call. Mutate it
+    -- synchronously and never retain it across a game-thread callback.
+    local info = unwrap(action_info)
+    local ok, error_value = pcall(function()
+        local vanilla = info.Interact1_Indicator
+        local deep = info.Interact2_Indicator
+        deep.IndicatorType = ENUM.indicator_deep_salvage
+        deep.buttonType = vanilla.buttonType
+        deep.longPushTime = vanilla.longPushTime
+        deep.ActionType = vanilla.ActionType
+        deep.bValid = true
+        deep.bLockRiding = vanilla.bLockRiding
+        deep.isInputComsume = vanilla.isInputComsume
+        deep.bCanToggle = vanilla.bCanToggle
+    end)
+
+    if ok then
+        performance.indicator_mutations =
+            performance.indicator_mutations + 1
+    end
+    if indicator_patch_status[component] == nil then
+        indicator_patch_status[component] = ok
+        log(ok and "INFO" or "ERROR", "deep_option_patch", {
+            target = full_name(component),
+            ok = ok,
+            error = error_value or "",
+            action = "Interact2",
+            indicator = "CommonInteract04",
+        })
+    end
+end
+
+local function on_get_indicator_text(
+    interactive_object,
+    world_context,
+    indicator_type,
+    return_value
+)
+    if enum_number(indicator_type) ~= ENUM.indicator_deep_salvage then
+        return
+    end
+    local component = unwrap(interactive_object)
+    if not is_salvage_object(component) then
+        return
+    end
+    local ok = set_param(
+        return_value,
+        FText("Deep Salvage - Magnet lost on failure")
+    )
+    if not ok and indicator_patch_status[component] ~= false then
+        indicator_patch_status[component] = false
+        log("ERROR", "deep_option_text_failed", {
+            target = full_name(component),
+        })
+    end
 end
 
 local function get_player_state(controller)
@@ -722,7 +799,36 @@ local function register_hook(name, path, callback)
     return ok
 end
 
+local function register_post_hook(name, path, callback)
+    local ok, first, second = pcall(
+        RegisterHook,
+        path,
+        function()
+        end,
+        callback
+    )
+    hook_status[name] = ok
+    log(ok and "INFO" or "ERROR", "hook_registration", {
+        hook = name,
+        path = path,
+        ok = ok,
+        pre_id = first or "",
+        post_id = second or "",
+        phase = "post",
+    })
+    return ok
+end
+
 local function register_hooks()
+    -- Palworld revision 82182 crashes inside UE4SS before callbacks run when
+    -- these interface functions are detoured. Keep the implementation for
+    -- reference, but fail closed by not registering either hook.
+    hook_status.get_indicator_info = false
+    hook_status.get_indicator_text = false
+    log("WARN", "interaction_option_disabled", {
+        reason = "unsafe-interface-detour",
+        revision = 82182,
+    })
     register_hook(
         "trigger_interact",
         PATHS.trigger_interact,
@@ -783,12 +889,16 @@ local function cleanup_expired_state()
                 performance.selection_checks or 0
         log("DEBUG", "performance_counters", {
             interval_ms = now - performance.last_report_ms,
+            indicator_checks = performance.indicator_checks,
+            indicator_mutations = performance.indicator_mutations,
             selection_checks = performance.selection_checks,
             salvage_cache_hits = performance.salvage_cache_hits,
             salvage_cache_misses = performance.salvage_cache_misses,
             salvage_cache_hit_rate = string.format("%.4f", hit_rate),
         })
         performance.selection_checks = 0
+        performance.indicator_checks = 0
+        performance.indicator_mutations = 0
         performance.salvage_cache_hits = 0
         performance.salvage_cache_misses = 0
         performance.last_report_ms = now

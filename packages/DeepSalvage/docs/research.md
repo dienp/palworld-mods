@@ -46,6 +46,105 @@ performs the additional permanent loss.
 - The salvage success/failure or treasure-open completion functions.
 - The authoritative loot roll/grant function and its reward payload.
 
+## Interaction solution validation
+
+Revalidated against revision 82182 reflection headers and the July 25 crash
+evidence:
+
+1. **Prompt-only LogicMod bridge — rejected.** It can observe
+   `OnUpdateInteractiveObjectDelegate`, but cannot populate an interaction
+   action. Its one-shot `PostBeginPlay` binding also races player-character
+   creation. It adds a BPModLoader actor and requires a cooked pak, but does
+   not make Palworld dispatch `Interact2`.
+2. **Additional Blueprint interaction component — rejected.** The required
+   `PalInteractiveObjectComponentInterface` is marked
+   `CannotImplementInterfaceInBlueprint`. A second component therefore cannot
+   supply action metadata without a native runtime class.
+3. **Synchronous `GetIndicatorInfo` post-hook — rejected after runtime
+   probe.** The reflected
+   interface owns the exact `FPalInteractiveObjectActionInfoSet` output that
+   Palworld consumes. For fishing salvage components only, copy the complete
+   vanilla `Interact1_Indicator` metadata into `Interact2_Indicator`, change
+   its indicator type, and return immediately. Never retain the temporary
+   out parameter or schedule work with it. A matching synchronous
+   `GetIndicatorText` post-hook supplies the Deep Salvage label. On revision
+   82182 with Workshop UE4SS experimental-palworld-6, inspecting a salvage
+   point crashes inside UE4SS with access violation `0x0000000400000042`
+   before the callback emits its first diagnostic. This is the same failure
+   signature as the earlier interface-hook probe, so synchronous access does
+   not make this detour safe.
+
+The Lua gameplay path requires UE4SS on each client and server, is restart-loaded
+in the Workshop UE4SS configuration, and packages as Lua only. The Lua
+install rule targets the package root (`"."`) so the official loader preserves
+`Scripts/main.lua`; targeting `./Scripts/` flattens `main.lua` into the mod
+root, which Workshop UE4SS does not discover. The unsafe indicator hooks now
+fail closed and are not registered; a real interaction option requires a
+targeted cooked-asset override or a native runtime component. It adds no
+Tick, timer, actor, world scan, RPC, or allocation-heavy UI bridge. Indicator
+queries are a UI hot path, so mutations are constant-time, object
+classification is weak-key cached, diagnostics emit once per component, and
+aggregate counters report at most once per configured interval.
+
+## Decision retrospective: prompt bridge and interface hook
+
+The initial LogicMod bridge was the wrong production choice.
+
+- We correctly identified that mutating temporary interface output from an
+  asynchronous callback was unsafe, but did not enforce the more important
+  requirement that the proposed bridge must actually populate an interaction
+  action and cause Palworld to dispatch `Interact2`.
+- The bridge only observed `OnUpdateInteractiveObjectDelegate` and printed a
+  prompt. It never wrote `FPalInteractiveObjectActionInfoSet`, so it could not
+  create a selectable Deep Salvage option.
+- Its one-shot `PostBeginPlay` binding also raced player-character creation.
+- After the bridge failed, we revisited the already-risky reflected
+  `GetIndicatorInfo` path. Registration success was mistaken for call safety.
+  Both probes crashed on the first salvage inspection with the same UE4SS
+  access-violation signature.
+
+The missing gate was an end-to-end proof before production implementation:
+
+`approach salvage -> two action slots -> press Interact2 -> StartTriggerInteract`
+
+Reflection presence, Blueprint-node availability, hook registration, and a
+printed prompt are not substitutes for that proof. Future Palworld interaction
+features must demonstrate the full event chain with a minimal probe before
+reward, inventory, networking, or packaging work proceeds.
+
+The intended corrected architecture was hybrid:
+
+- a salvage-specific cooked asset creates and labels `Interact2`;
+- UE4SS Lua implements selection tracking, difficulty, authoritative Magnet
+  loss, additive reward calculation, and diagnostics.
+
+The cooked half then failed its own feasibility gate. Revision 82182 exposes
+`FPalInteractiveObjectActionInfoSet::Interact2_Indicator`, but the method that
+fills the set is the native-only
+`IPalInteractiveObjectComponentInterface::GetIndicatorInfo`. The interface is
+marked `CannotImplementInterfaceInBlueprint`, and the concrete capsule
+component's function is `BlueprintCallable`, not a Blueprint override event.
+The extracted `BP_InteractableCapsule` is data-only and contains no action-info
+defaults or graph to patch. The salvage treasure classes likewise expose no
+editable secondary-action field or Blueprint override point.
+
+Therefore a cooked asset by itself cannot create Deep Salvage with the current
+PMK surface. A viable implementation now requires a native runtime component
+that safely owns the secondary interaction, with a cooked salvage-specific
+asset attaching that component and UE4SS Lua retaining the gameplay policy.
+The native component must pass this minimal proof before integration:
+
+`approach salvage -> two action slots -> press Interact2 -> native callback`
+
+Only after that proof may it forward the selected attempt to Lua. This keeps
+the hot-reloadable gameplay logic while accepting that native-component and
+cooked-asset changes require a restart.
+
+The existing Visible Fishing Salvage Spots mod already overrides both Rank 1
+and Rank 2 fishing-junk treasure assets. Any eventual Deep Salvage cooked
+override must merge those visibility edits into the same assets; relying on
+pak load order would make the two mods mutually destructive.
+
 ## Jellroy Drop stacking
 
 The current Pal headers expose a dedicated

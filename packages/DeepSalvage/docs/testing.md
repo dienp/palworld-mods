@@ -3,8 +3,8 @@
 ## Build
 
 - Game revision: 82182 or newer
-- Build version: `0.1.0-dev.9`
-- Package: `DeepSalvage-0.1.0-dev.9.zip`
+- Build version: `0.1.0-dev.16`
+- Package: `DeepSalvage-0.1.0-dev.16.zip`
 - Deployment: server and every participating client
 - Debug mode: enabled
 
@@ -16,7 +16,7 @@ notifications appear while Deep Salvage remains functional. Development builds
 use `debug_console = true`; temporarily set it to `false` only when validating
 notification-only behavior.
 
-Confirm every required hook reports
+For the crash-safe Lua checkpoint, confirm these required hooks report
 `event=hook_registration | ... | ok=true`:
 
 - `trigger_interact`
@@ -25,6 +25,10 @@ Confirm every required hook reports
 - `salvage_result`
 - `create_items`
 - `cancel_salvage`
+
+Confirm `event=interaction_option_disabled` reports
+`reason=unsafe-interface-detour`. Neither `get_indicator_info` nor
+`get_indicator_text` may be registered in this checkpoint.
 
 Also confirm `event=object_notification_registration | ... | ok=true`.
 Any failure blocks release.
@@ -52,7 +56,18 @@ means the second interaction is unavailable; a missing server copy means the
 authoritative wager and reward rules are unavailable. Vanilla Salvage must
 remain available in either case.
 
-## Interaction and difficulty
+## Native interaction proof gate
+
+The current Lua checkpoint does not expose Deep Salvage. Before enabling the
+gameplay tests below, the native component and cooked asset must prove:
+
+`approach salvage -> two action slots -> press Interact2 -> native callback`
+
+The native proof must use no Tick, recurring timer, global object scan, or
+indicator-query logging. It requires a game restart; Lua gameplay-policy
+changes remain hot-reloadable.
+
+## Interaction and difficulty (pending native proof)
 
 - Approach a Magnet salvage spot with at least one Fishing Magnet.
 - Confirm both vanilla Salvage and `Deep Salvage — Wager 1 Magnet` appear.

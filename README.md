@@ -16,6 +16,9 @@ packages, research notes, and Codex automation.
 ## Getting started
 
 Requirements: Node.js 20.19+ and, for asset-tool builds, .NET 8.
+LogicMod development additionally requires the pinned Unreal, Visual Studio,
+Wwise, and PMK setup in
+[`docs/windows-toolchain.md`](docs/windows-toolchain.md).
 
 ```powershell
 npm install
