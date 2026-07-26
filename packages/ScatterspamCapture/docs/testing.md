@@ -316,3 +316,9 @@ a sub-1% target.
 
 - Renames the internal package, project, source tool, Lua log prefix, and
   installed UE4SS folder to `ScatterspamCapture`.
+
+## Version 1.0.7
+
+- Corrects the formatting threshold: aiming rates at or above `1%` use three
+  truncated decimal places.
+- Leaves rates below `1%` to Palworld's vanilla formatter.

@@ -8,9 +8,9 @@ Production release: `1.0.0`
 
 The UE4SS mod:
 
-- Shows three truncated decimals while aiming when capture chance is below
+- Shows three truncated decimals while aiming when capture chance is at least
   `1%`.
-- Leaves capture rates at or above `1%` to Palworld's vanilla formatter.
+- Leaves capture rates below `1%` to Palworld's vanilla formatter.
 - Suppresses ineffective-sphere warning records to reduce notification churn
   during scatter-launcher sphere spam.
 

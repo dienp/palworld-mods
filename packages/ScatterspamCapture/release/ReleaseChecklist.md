@@ -13,8 +13,8 @@
 - [ ] Restart Palworld when prompted.
 - [ ] Verify `Mods/ManagedMods/ScatterspamCapture/InstallManifest.json`.
 - [ ] Compare the installed `Scripts/main.lua` SHA-256 with `SHA256SUMS.txt`.
-- [ ] Confirm sub-1% aiming shows three truncated decimals.
-- [ ] Confirm rates at or above 1% retain vanilla formatting and `%`.
+- [ ] Confirm aiming rates at or above 1% show three truncated decimals.
+- [ ] Confirm rates below 1% retain vanilla formatting and `%`.
 - [ ] Confirm ineffective-sphere notifications are suppressed during scatter spam.
 - [ ] Confirm no severe frame drop during repeated scatter-launcher use.
 - [ ] Remove or disable the loose UE4SS development copy before managed testing.
