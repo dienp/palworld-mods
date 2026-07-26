@@ -53,7 +53,23 @@ if (!info.InstallRule.some((rule) => rule.Type === expectedType)) {
 }
 
 if (expectedType === 'Lua') {
-  const source = readFileSync(join(payloadRoot, 'Scripts', 'main.lua'), 'utf8');
+  const luaEntryPoint = join(payloadRoot, 'Scripts', 'main.lua');
+  if (!existsSync(luaEntryPoint)) {
+    throw new Error(
+      `${packageName}: Lua entry point must be package/${packageName}/Scripts/main.lua`
+    );
+  }
+
+  const luaRules = info.InstallRule.filter((rule) => rule.Type === 'Lua');
+  if (!luaRules.some((rule) =>
+    Array.isArray(rule.Targets) && rule.Targets.includes('.')
+  )) {
+    throw new Error(
+      `${packageName}: Lua InstallRule must target '.' to preserve Scripts/main.lua`
+    );
+  }
+
+  const source = readFileSync(luaEntryPoint, 'utf8');
   for (const flag of ['debug_enabled', 'debug_notifications', 'debug_console']) {
     if (!source.includes(flag)) {
       console.warn(`${packageName}: consider retaining '${flag}' diagnostics`);

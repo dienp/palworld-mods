@@ -97,7 +97,7 @@ $projectConfig | ConvertTo-Json -Depth 5 |
     Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedProject 'mod-project.json')
 
 $installType = if ($ModType -eq 'Lua') { 'Lua' } else { $ModType }
-$target = "./$typeFolder/"
+$target = if ($ModType -eq 'Lua') { '.' } else { "./$typeFolder/" }
 $info = [ordered]@{
     ModName = $ModName
     PackageName = $PackageName

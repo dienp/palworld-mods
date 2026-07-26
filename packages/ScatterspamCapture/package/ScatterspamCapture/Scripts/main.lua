@@ -9,7 +9,7 @@ local TEXT_BLOCK_CLASS_PATH =
     "/Game/Pal/Blueprint/UI/PalTextBlock/" ..
     "BP_PalTextBlock.BP_PalTextBlock_C"
 local ADD_LOG_HOOK_PATH = "/Script/Pal.PalLogManager:AddLog"
-local SPHERE_WARNING_PREFIX = "This Sphere isn't working on"
+local SPHERE_WARNING_PREFIX = "this sphere isn't working on"
 
 local function log(message)
     print(string.format("[%s] %s\n", MOD_NAME, message))
@@ -200,31 +200,51 @@ local function on_capture_rate_formatted(self, rate)
     end)
 end
 
-local function suppress_ineffective_sphere_warning(
-    self,
-    log_priority,
-    log_text,
-    additional_data
-)
-    local text_value = unwrap(log_text)
+local function text_to_string(parameter)
+    local text_value = unwrap(parameter)
     if text_value == nil then
-        return
+        return nil
+    end
+
+    if type(text_value) == "string" then
+        return text_value
     end
 
     local ok, message = pcall(function()
         return text_value:ToString()
     end)
     if not ok or type(message) ~= "string" then
-        return
+        return nil
     end
 
-    if string.sub(message, 1, #SPHERE_WARNING_PREFIX) ==
-        SPHERE_WARNING_PREFIX then
-        -- Priority None is Palworld's non-dispatch path. This prevents the
-        -- warning from creating an invisible normal-log record for every
-        -- projectile in a scatter burst.
-        log_priority:set(0)
-        log_text:set(FText(""))
+    return message
+end
+
+local function suppress_ineffective_sphere_warning(...)
+    local parameters = { ... }
+
+    -- Palworld has changed AddLog's native parameter layout across revisions.
+    -- Locate the FText argument by value instead of assuming a fixed position.
+    for index = 2, #parameters do
+        local parameter = parameters[index]
+        local message = text_to_string(parameter)
+        if message ~= nil then
+            local normalized_message = string.lower(message)
+            if string.sub(normalized_message, 1, #SPHERE_WARNING_PREFIX) ==
+                SPHERE_WARNING_PREFIX then
+                -- AddLog places EPalLogPriority immediately before its FText
+                -- argument. None (0) takes Palworld's non-dispatch path, so no
+                -- empty notification record is added to the queue.
+                local priority_parameter = parameters[index - 1]
+                if priority_parameter ~= nil then
+                    pcall(function()
+                        priority_parameter:set(0)
+                    end)
+                end
+                parameter:set(FText(""))
+                return
+            end
+        end
     end
 end
 

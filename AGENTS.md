@@ -7,6 +7,10 @@ This repository contains Palworld mods orchestrated by Nx.
 - Keep each mod in `packages/<PackageName>`.
 - Keep reusable Codex skills in `skills/<skill-name>`.
 - Treat `package/<PackageName>` as the exact loader/Workshop payload.
+- For Lua mods, keep the entry point at `package/<PackageName>/Scripts/main.lua`
+  and set the Lua install rule target to `"."`. Targeting `"./Scripts/"`
+  flattens `main.lua` into the installed mod root; UE4SS requires
+  `<PackageName>/Scripts/main.lua` and will not load the flattened mod.
 - Keep research notes and reproducible source code; do not commit extracted game assets, installed tools, caches, saves, or local backups.
 - Store machine-specific paths in ignored `*.local.json` files. Committed `mod-project.json` files must use repository-relative paths or empty values.
 - Preserve runtime diagnostic switches in Lua sources. Production releases disable diagnostics through configuration rather than deleting instrumentation.
