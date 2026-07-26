@@ -1,169 +1,62 @@
 local MOD_NAME = "DeepSalvage"
-local MOD_VERSION = "0.1.0-dev.16"
+local MOD_VERSION = "1.0.1"
 
 local CONFIG = {
-    magnet_item_id = "Salvage_TreasureBoxKey01",
-    deep_gauge_range_percent = 5.0,
-    deep_cursor_percent_speed = 90.0,
-    deep_reward_bonus = 1.0,
-    selection_timeout_ms = 10000,
+    modifier_chance = 1.0,
+    risk_failure_chance = 0.0,
+    extra_magnet_cost = 1,
+    reward_bonus = 1.0,
     attempt_timeout_ms = 120000,
-    -- Keep diagnostics in source. Set this to false for production releases.
-    debug_enabled = true,
-    debug_notifications = true,
-    debug_console = true,
+    -- Keep diagnostics in source. Disable them through configuration for release.
+    debug_enabled = false,
+    debug_notifications = false,
+    debug_console = false,
+    deep_salvage_notification = true,
     notification_cooldown_ms = 2000,
-    performance_report_interval_ms = 10000,
 }
 
-local MESSAGE_PREFIX = "__DEEP_SALVAGE__"
-local START_PREFIX = MESSAGE_PREFIX .. "START|"
-
 local PATHS = {
-    get_indicator_info =
-        "/Script/Pal.PalInteractiveObjectComponentInterface:GetIndicatorInfo",
-    get_indicator_text =
-        "/Script/Pal.PalInteractiveObjectComponentInterface:GetIndicatorText",
-    trigger_interact = "/Script/Pal.PalInteractComponent:StartTriggerInteract",
-    chat_receive = "/Script/Pal.PalPlayerController:EnterChat_Receive",
     request_open =
         "/Script/Pal.PalMapObjectTreasureBoxModel:RequestOpen_ServerInternal",
     salvage_result =
         "/Script/Pal.PalMapObjectTreasureBoxModel:OnReceiveSalvageResult",
     create_items =
         "/Script/Pal.PalMapObjectTreasureBoxModel:CreateItemInfo",
-    cancel_salvage =
-        "/Script/Pal.PalNetworkPlayerComponent:" ..
-        "RequestCancelSalvageAction_ToServer",
+    add_item =
+        "/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal",
+    obtain_info =
+        "/Script/Pal.PalMapObjectTreasureBoxModel:Debug_ReceiveObtainInfo_ClientInternal",
 }
 
 local ENUM = {
-    interact2 = 2,
-    indicator_deep_salvage = 110, -- CommonInteract04
-    action_fishing_salvage = 98,
     passive_fishing_salvage_drop = 119,
 }
 
-local hook_status = {}
-local local_selection = nil
-local server_selections_by_player = {}
-local server_attempts_by_model = {}
-local local_deep_model_budget = 0
-local salvage_object_cache = setmetatable({}, {__mode = "k"})
-local indicator_patch_status = setmetatable({}, {__mode = "k"})
+local attempts_by_model = {}
+local magnet_slot_cache = {}
 local cached_log_manager = nil
 local last_notification_by_event = {}
-local performance = {
-    indicator_checks = 0,
-    indicator_mutations = 0,
-    selection_checks = 0,
-    salvage_cache_hits = 0,
-    salvage_cache_misses = 0,
-    last_report_ms = os.time() * 1000,
+local callback_seen = {
+    request_open = false,
+    salvage_result = false,
+    create_items = false,
 }
+local active_reward_attempt = nil
+local traced_object_classes = {}
+local get_jellroy_multiplier
+local round_quantity
+
+math.randomseed(os.time())
+math.random()
+math.random()
+math.random()
 
 local function timestamp()
     return os.date("!%Y-%m-%dT%H:%M:%SZ")
 end
 
-local function notification_priority(level)
-    if level == "ERROR" then
-        return 3 -- EPalLogPriority::VeryImportant
-    end
-    if level == "WARN" then
-        return 2 -- EPalLogPriority::Important
-    end
-    return 1 -- EPalLogPriority::Normal
-end
-
-local function notify_debug(level, event, fields)
-    if not CONFIG.debug_enabled or not CONFIG.debug_notifications then
-        return
-    end
-
-    local notification_key = tostring(level) .. ":" .. tostring(event)
-    local current_ms = os.time() * 1000
-    local last_ms = last_notification_by_event[notification_key]
-    if last_ms ~= nil and
-        current_ms - last_ms < CONFIG.notification_cooldown_ms then
-        return
-    end
-
-    local summary = {"[Deep Salvage]", tostring(event)}
-    if fields ~= nil then
-        for _, key in ipairs({
-            "reason",
-            "formula_match",
-            "expected_final",
-            "actual_final",
-            "magnet_before",
-            "magnet_after",
-        }) do
-            if fields[key] ~= nil then
-                table.insert(summary, key .. "=" .. tostring(fields[key]))
-            end
-        end
-    end
-
-    local message = table.concat(summary, " | ")
-    local ok = pcall(function()
-        local manager_valid = false
-        if cached_log_manager ~= nil then
-            local valid_ok, valid = pcall(function()
-                return cached_log_manager:IsValid()
-            end)
-            manager_valid = valid_ok and valid
-        end
-        if not manager_valid then
-            cached_log_manager = FindFirstOf("PalLogManager")
-        end
-        if cached_log_manager == nil then
-            return
-        end
-        cached_log_manager:AddLog(
-            notification_priority(level),
-            FText(message),
-            {}
-        )
-        last_notification_by_event[notification_key] = current_ms
-    end)
-
-    if not ok and CONFIG.debug_console then
-        print(string.format(
-            "[%s] notification_failed | event=%s\n",
-            MOD_NAME,
-            tostring(event)
-        ))
-    end
-end
-
-local function log(level, event, fields)
-    if not CONFIG.debug_enabled then
-        return
-    end
-
-    if CONFIG.debug_console then
-        local parts = {
-            string.format("[%s]", MOD_NAME),
-            timestamp(),
-            "level=" .. tostring(level),
-            "event=" .. tostring(event),
-        }
-        if fields ~= nil then
-            local keys = {}
-            for key, _ in pairs(fields) do
-                table.insert(keys, key)
-            end
-            table.sort(keys)
-            for _, key in ipairs(keys) do
-                local value = tostring(fields[key])
-                value = string.gsub(value, "[\r\n|]", " ")
-                table.insert(parts, tostring(key) .. "=" .. value)
-            end
-        end
-        print(table.concat(parts, " | ") .. "\n")
-    end
-    notify_debug(level, event, fields)
+local function now_ms()
+    return os.time() * 1000
 end
 
 local function unwrap(value)
@@ -184,6 +77,17 @@ local function set_param(parameter, value)
         parameter:set(value)
     end)
     return ok
+end
+
+local function name_string(value)
+    value = unwrap(value)
+    if value == nil then
+        return ""
+    end
+    local ok, text = pcall(function()
+        return value:ToString()
+    end)
+    return ok and tostring(text) or tostring(value)
 end
 
 local function is_valid(object)
@@ -207,72 +111,6 @@ local function full_name(object)
     return ok and tostring(value) or tostring(object)
 end
 
-local function now_ms()
-    return os.time() * 1000
-end
-
-local enum_number
-
-enum_number = function(value)
-    value = unwrap(value)
-    if type(value) == "number" then
-        return value
-    end
-    local text = tostring(value)
-    local ok, converted = pcall(function()
-        return value:ToString()
-    end)
-    if ok and converted ~= nil then
-        text = tostring(converted)
-    end
-    local known = {
-        Interact2 = ENUM.interact2,
-        CommonInteract04 = ENUM.indicator_deep_salvage,
-        FishingSalvage = ENUM.action_fishing_salvage,
-    }
-    if known[text] ~= nil then
-        return known[text]
-    end
-    local numeric = tonumber(value)
-    if numeric ~= nil then
-        return numeric
-    end
-    return nil
-end
-
-local function name_string(value)
-    value = unwrap(value)
-    if value == nil then
-        return ""
-    end
-    if type(value) == "string" then
-        return value
-    end
-    local ok, text = pcall(function()
-        return value:ToString()
-    end)
-    return ok and tostring(text) or tostring(value)
-end
-
-local function split_pipe(value)
-    local values = {}
-    local start_index = 1
-    while true do
-        local separator_index = string.find(value, "|", start_index, true)
-        if separator_index == nil then
-            table.insert(values, string.sub(value, start_index))
-            break
-        end
-
-        table.insert(values, string.sub(value, start_index, separator_index - 1))
-        if #values > 16 then
-            break
-        end
-        start_index = separator_index + 1
-    end
-    return values
-end
-
 local function get_owner(object)
     object = unwrap(object)
     if not is_valid(object) then
@@ -284,144 +122,131 @@ local function get_owner(object)
     return ok and unwrap(owner) or nil
 end
 
-local function is_salvage_object(object)
-    local target = unwrap(object)
-    if not is_valid(target) then
+local function is_fishing_salvage(object)
+    object = unwrap(object)
+    if not is_valid(object) then
         return false
     end
-    performance.selection_checks = performance.selection_checks + 1
-    local cached = salvage_object_cache[target]
-    if cached ~= nil then
-        performance.salvage_cache_hits =
-            performance.salvage_cache_hits + 1
-        return cached
-    end
-
-    performance.salvage_cache_misses =
-        performance.salvage_cache_misses + 1
-    local owner = get_owner(target)
-    local target_name = full_name(target)
-    local owner_name = full_name(owner)
-    local is_salvage =
-        string.find(target_name, "FishingJunkSpot", 1, true) ~= nil or
+    local object_name = full_name(object)
+    local owner_name = full_name(get_owner(object))
+    local special_ok, special_type = pcall(function()
+        return tonumber(unwrap(
+            object:GetPropertyValue("TreasureSpecialType")
+        ))
+    end)
+    return special_ok and special_type == 1 or
+        string.find(object_name, "FishingJunkSpot", 1, true) ~= nil or
         string.find(owner_name, "FishingJunkSpot", 1, true) ~= nil
-    salvage_object_cache[target] = is_salvage
-    return is_salvage
 end
 
-local function on_get_indicator_info(
-    interactive_object,
-    action_info,
-    situation_info
-)
-    local component = unwrap(interactive_object)
-    performance.indicator_checks = performance.indicator_checks + 1
-    if not is_salvage_object(component) then
+local function notification_priority(level)
+    if level == "ERROR" then
+        return 3
+    end
+    if level == "WARN" then
+        return 2
+    end
+    return 1
+end
+
+local function notify_debug(level, event, fields)
+    if not CONFIG.debug_enabled or not CONFIG.debug_notifications then
+        return
+    end
+    local key = tostring(level) .. ":" .. tostring(event)
+    local current_ms = now_ms()
+    local previous_ms = last_notification_by_event[key]
+    if previous_ms ~= nil and
+        current_ms - previous_ms < CONFIG.notification_cooldown_ms then
         return
     end
 
-    -- ActionInfo is an out parameter owned by this call. Mutate it
-    -- synchronously and never retain it across a game-thread callback.
-    local info = unwrap(action_info)
-    local ok, error_value = pcall(function()
-        local vanilla = info.Interact1_Indicator
-        local deep = info.Interact2_Indicator
-        deep.IndicatorType = ENUM.indicator_deep_salvage
-        deep.buttonType = vanilla.buttonType
-        deep.longPushTime = vanilla.longPushTime
-        deep.ActionType = vanilla.ActionType
-        deep.bValid = true
-        deep.bLockRiding = vanilla.bLockRiding
-        deep.isInputComsume = vanilla.isInputComsume
-        deep.bCanToggle = vanilla.bCanToggle
-    end)
+    local summary = {"[Deep Salvage]", tostring(event)}
+    if fields ~= nil then
+        for _, field in ipairs({
+            "selected",
+            "success",
+            "formula_match",
+            "reason",
+            "reward_comparison",
+            "difficulty",
+            "risk",
+        }) do
+            if fields[field] ~= nil then
+                table.insert(summary, field .. "=" .. tostring(fields[field]))
+            end
+        end
+    end
 
-    if ok then
-        performance.indicator_mutations =
-            performance.indicator_mutations + 1
-    end
-    if indicator_patch_status[component] == nil then
-        indicator_patch_status[component] = ok
-        log(ok and "INFO" or "ERROR", "deep_option_patch", {
-            target = full_name(component),
-            ok = ok,
-            error = error_value or "",
-            action = "Interact2",
-            indicator = "CommonInteract04",
-        })
-    end
+    pcall(function()
+        if not is_valid(cached_log_manager) then
+            cached_log_manager = FindFirstOf("PalLogManager")
+        end
+        if is_valid(cached_log_manager) then
+            cached_log_manager:AddLog(
+                notification_priority(level),
+                FText(table.concat(summary, " | ")),
+                {}
+            )
+            last_notification_by_event[key] = current_ms
+        end
+    end)
 end
 
-local function on_get_indicator_text(
-    interactive_object,
-    world_context,
-    indicator_type,
-    return_value
-)
-    if enum_number(indicator_type) ~= ENUM.indicator_deep_salvage then
+local function notify_deep_salvage()
+    if not CONFIG.deep_salvage_notification then
         return
     end
-    local component = unwrap(interactive_object)
-    if not is_salvage_object(component) then
+    pcall(function()
+        if not is_valid(cached_log_manager) then
+            cached_log_manager = FindFirstOf("PalLogManager")
+        end
+        if is_valid(cached_log_manager) then
+            cached_log_manager:AddLog(
+                2,
+                FText(
+                    "[Deep Salvage] Extra Fishing Magnet consumed; " ..
+                    "enhanced rewards active."
+                ),
+                {}
+            )
+        end
+    end)
+end
+
+local function log(level, event, fields)
+    if not CONFIG.debug_enabled then
         return
     end
-    local ok = set_param(
-        return_value,
-        FText("Deep Salvage - Magnet lost on failure")
-    )
-    if not ok and indicator_patch_status[component] ~= false then
-        indicator_patch_status[component] = false
-        log("ERROR", "deep_option_text_failed", {
-            target = full_name(component),
-        })
+    if CONFIG.debug_console then
+        local parts = {
+            string.format("[%s]", MOD_NAME),
+            timestamp(),
+            "level=" .. tostring(level),
+            "event=" .. tostring(event),
+        }
+        if fields ~= nil then
+            local keys = {}
+            for key, _ in pairs(fields) do
+                table.insert(keys, key)
+            end
+            table.sort(keys)
+            for _, key in ipairs(keys) do
+                local value = string.gsub(
+                    tostring(fields[key]),
+                    "[\r\n|]",
+                    " "
+                )
+                table.insert(parts, tostring(key) .. "=" .. value)
+            end
+        end
+        print(table.concat(parts, " | ") .. "\n")
     end
+    notify_debug(level, event, fields)
 end
 
-local function get_player_state(controller)
-    controller = unwrap(controller)
-    if not is_valid(controller) then
-        return nil
-    end
-    local ok, state = pcall(function()
-        return controller:GetPalPlayerState()
-    end)
-    return ok and unwrap(state) or nil
-end
-
-local function get_player_id(controller)
-    local state = get_player_state(controller)
-    if not is_valid(state) then
-        return nil
-    end
-    local ok, id = pcall(function()
-        return state:GetPlayerId()
-    end)
-    if ok then
-        return tonumber(unwrap(id))
-    end
-    return nil
-end
-
-local function get_inventory(controller)
-    local state = get_player_state(controller)
-    if not is_valid(state) then
-        return nil
-    end
-    local ok, inventory = pcall(function()
-        return state:GetInventoryData()
-    end)
-    return ok and unwrap(inventory) or nil
-end
-
-local function get_magnet_count(controller)
-    local inventory = get_inventory(controller)
-    if not is_valid(inventory) then
-        return nil
-    end
-    local ok, count = pcall(function()
-        return inventory:CountItemNum(FName(CONFIG.magnet_item_id))
-    end)
-    return ok and tonumber(unwrap(count)) or nil
+local function roll(chance)
+    return math.random() < chance
 end
 
 local function find_controller_by_player_id(player_id)
@@ -432,169 +257,815 @@ local function find_controller_by_player_id(player_id)
         return nil
     end
     for _, controller in ipairs(controllers) do
-        if is_valid(controller) and get_player_id(controller) == player_id then
-            return controller
+        if is_valid(controller) then
+            local id_ok, state = pcall(function()
+                return unwrap(controller:GetPalPlayerState())
+            end)
+            local value_ok, value = pcall(function()
+                return unwrap(state:GetPlayerId())
+            end)
+            if id_ok and value_ok and tonumber(value) == player_id then
+                return controller
+            end
         end
     end
     return nil
 end
 
-local function send_control_message(controller, payload)
+local function get_inventory(controller)
     controller = unwrap(controller)
     if not is_valid(controller) then
-        log("ERROR", "control_send_failed", {reason = "invalid-controller"})
-        return false
+        return nil
     end
-    local ok, error_value = pcall(function()
-        controller:EnterChat_Receive(payload, 0)
+    local state = nil
+    pcall(function()
+        state = unwrap(controller:GetPalPlayerState())
     end)
-    log(ok and "DEBUG" or "ERROR", "control_send", {
-        payload = payload,
-        controller = full_name(controller),
-        error = error_value or "",
-    })
-    return ok
+    if not is_valid(state) then
+        return nil
+    end
+    local inventory = nil
+    pcall(function()
+        inventory = unwrap(state:GetInventoryData())
+    end)
+    return is_valid(inventory) and inventory or nil
 end
 
-local function suppress_control_parameter(parameter)
-    local suppressed = set_param(parameter, "")
-    if not suppressed then
-        suppressed = set_param(parameter, FName("None"))
+local salvage_slot_item_id
+
+local function salvage_magnet_id(model)
+    local grade = 1
+    pcall(function()
+        grade = tonumber(unwrap(model.TreasureGradeType)) or 1
+    end)
+    if grade >= 1 then
+        return "Salvage_TreasureBoxKey02", grade
     end
-    return suppressed
+    return "Salvage_TreasureBoxKey01", grade
 end
 
-local function on_chat_receive(controller, message, category)
-    local text = name_string(message)
-    if string.sub(text, 1, #MESSAGE_PREFIX) ~= MESSAGE_PREFIX then
-        return
+local function refresh_magnet_slot_cache(item_id)
+    local cached_slots = {}
+    local scan_ok, scan_error = pcall(function()
+        local slots = FindObjects(0, "PalItemSlot", nil, nil, nil, false)
+        for _, candidate in ipairs(slots) do
+            local slot = unwrap(candidate)
+            if is_valid(slot) and salvage_slot_item_id(slot) == item_id then
+                table.insert(cached_slots, slot)
+            end
+        end
+    end)
+    if not scan_ok then
+        return nil, "magnet-cache-failed:" .. tostring(scan_error)
     end
-    local suppressed = suppress_control_parameter(message)
-    set_param(category, 255)
-    if string.sub(text, 1, #START_PREFIX) == START_PREFIX then
-        local fields = split_pipe(string.sub(text, #START_PREFIX + 1))
-        local target_name = fields[1] or "<unknown>"
-        local player_id = get_player_id(controller)
-        local magnet_before = get_magnet_count(controller)
-        if player_id ~= nil and magnet_before ~= nil and magnet_before >= 1 then
-            server_selections_by_player[player_id] = {
-                expires = now_ms() + CONFIG.selection_timeout_ms,
-                target_name = target_name,
-                controller = controller,
-                magnet_before = magnet_before,
-            }
-            log("INFO", "deep_selection_accepted", {
-                player_id = player_id,
-                target = target_name,
-                magnet_count = magnet_before,
-                expires = server_selections_by_player[player_id].expires,
-                suppressed = suppressed,
-            })
-        else
-            log("WARN", "deep_selection_rejected", {
-                player_id = player_id or "unknown",
-                target = target_name,
-                magnet_count = magnet_before or "unavailable",
-                suppressed = suppressed,
-            })
+    magnet_slot_cache[item_id] = cached_slots
+    return cached_slots, nil
+end
+
+local function capture_magnet_slots(model)
+    local item_id, grade = salvage_magnet_id(model)
+    local matching_slots = {}
+    local cached_slots = magnet_slot_cache[item_id]
+    if cached_slots == nil then
+        local cache_error
+        cached_slots, cache_error = refresh_magnet_slot_cache(item_id)
+        if cached_slots == nil then
+            return nil, cache_error
         end
     end
+    for _, slot in ipairs(cached_slots) do
+        if is_valid(slot) then
+            local stack = tonumber(slot.StackCount) or 0
+            if stack > 0 then
+                table.insert(matching_slots, {
+                    container = unwrap(slot:GetOuter()),
+                    slot = slot,
+                    before_vanilla = stack,
+                })
+            end
+        end
+    end
+    if #matching_slots == 0 then
+        magnet_slot_cache[item_id] = nil
+        return nil, "no-" .. item_id .. "-slots"
+    end
+    return {
+        item_id = item_id,
+        grade = grade,
+        slots = matching_slots,
+    }, nil
 end
 
-local function on_start_trigger_interact(interact_component, action_type)
-    local action = enum_number(action_type)
-    if action ~= ENUM.interact2 then
-        return
+local function consume_from_vanilla_source(attempt)
+    local snapshot = attempt.magnet_snapshot
+    if snapshot == nil then
+        return false, "missing-magnet-snapshot"
     end
-    local component = unwrap(interact_component)
-    local target = nil
-    pcall(function()
-        target = unwrap(component.TargetInteractiveObject)
+    local source = nil
+    for _, entry in ipairs(snapshot.slots) do
+        if is_valid(entry.slot) then
+            local current = tonumber(entry.slot.StackCount) or 0
+            if current < entry.before_vanilla then
+                if source ~= nil then
+                    return false, "multiple-magnet-sources-changed"
+                end
+                source = entry
+                source.after_vanilla = current
+            end
+        end
+    end
+    if source == nil then
+        magnet_slot_cache[snapshot.item_id] = nil
+        return false, "vanilla-magnet-source-not-observed"
+    end
+    if source.after_vanilla < CONFIG.extra_magnet_cost then
+        return false, "insufficient-magnets-after-vanilla"
+    end
+    local mutation_ok, mutation_error = pcall(function()
+        source.slot.StackCount =
+            source.after_vanilla - CONFIG.extra_magnet_cost
+        if tonumber(source.slot.StackCount) ~=
+            source.after_vanilla - CONFIG.extra_magnet_cost then
+            error("magnet-stack-write-verification-failed")
+        end
     end)
-    if not is_salvage_object(target) then
-        return
+    if not mutation_ok then
+        return false, mutation_error
     end
+    attempt.extra_magnet_slot = source.slot
+    log("INFO", "extra_magnet_consumed", {
+        item = snapshot.item_id,
+        grade = snapshot.grade,
+        count_before_vanilla = source.before_vanilla,
+        count_after_vanilla = source.after_vanilla,
+        count_after_extra_cost =
+            source.after_vanilla - CONFIG.extra_magnet_cost,
+        extra_cost = CONFIG.extra_magnet_cost,
+        container = full_name(source.container),
+    })
+    return true, nil
+end
+
+local function dump_inventory_functions()
     local controller = FindFirstOf("PalPlayerController")
-    local magnet_count = get_magnet_count(controller)
-    if magnet_count == nil or magnet_count < 1 then
-        log("WARN", "deep_input_blocked", {
-            reason = "missing-magnet",
-            magnet_count = magnet_count or "unavailable",
-            target = full_name(target),
+    local inventory = get_inventory(controller)
+    if not is_valid(inventory) then
+        log("WARN", "inventory_function_dump", {
+            reason = "inventory-unavailable",
         })
         return
     end
-    local_selection = {
-        target = full_name(target),
-        expires = now_ms() + CONFIG.selection_timeout_ms,
-        magnet_before = magnet_count,
-    }
-    local_deep_model_budget = local_deep_model_budget + 1
-    send_control_message(controller, START_PREFIX .. local_selection.target)
-    log("INFO", "deep_input_selected", {
-        target = local_selection.target,
-        magnet_count = magnet_count,
-        model_budget = local_deep_model_budget,
+    local count = 0
+    local ok, error_value = pcall(function()
+        local struct = inventory:GetClass()
+        local depth = 0
+        while is_valid(struct) and depth < 5 and count < 160 do
+            struct:ForEachFunction(function(func)
+                local name = tostring(func:GetFName():ToString())
+                if string.find(name, "Item", 1, true) ~= nil or
+                    string.find(name, "Add", 1, true) ~= nil then
+                    count = count + 1
+                    log("DEBUG", "inventory_function", {
+                        depth = depth,
+                        name = name,
+                        full_name = tostring(func:GetFullName()),
+                    })
+                end
+                return nil
+            end)
+            struct = struct:GetSuperStruct()
+            depth = depth + 1
+        end
+    end)
+    log(ok and "INFO" or "ERROR", "inventory_function_dump", {
+        count = count,
+        class = full_name(inventory:GetClass()),
+        error = error_value or "",
     })
 end
 
-local function configure_salvage_model(model)
-    model = unwrap(model)
-    if not is_valid(model) or local_deep_model_budget <= 0 or
-        local_selection == nil then
+local function dump_spawn_surfaces()
+    local candidates = {
+        "PalGameMode",
+        "PalGameState",
+        "PalCharacterManager",
+        "PalNPCManager",
+        "PalSpawnerManager",
+        "PalWildCharacterManager",
+        "PalNetworkCharacterComponent",
+        "PalWorldSecuritySystem",
+        "PalNetworkWorldSecurityComponent",
+    }
+    for _, class_name in ipairs(candidates) do
+        local object = FindFirstOf(class_name)
+        local count = 0
+        local ok, error_value = pcall(function()
+            if not is_valid(object) then
+                error("object-not-found")
+            end
+            local struct = object:GetClass()
+            local depth = 0
+            while is_valid(struct) and depth < 6 and count < 120 do
+                struct:ForEachFunction(function(func)
+                    local name = tostring(func:GetFName():ToString())
+                    if string.find(name, "Spawn", 1, true) or
+                        string.find(name, "Summon", 1, true) or
+                        string.find(name, "Character", 1, true) or
+                        string.find(name, "NPC", 1, true) or
+                        string.find(name, "Wanted", 1, true) or
+                        string.find(name, "Crime", 1, true) or
+                        string.find(name, "Police", 1, true) then
+                        count = count + 1
+                        log("DEBUG", "spawn_function", {
+                            candidate = class_name,
+                            object = full_name(object),
+                            name = name,
+                            full_name = tostring(func:GetFullName()),
+                        })
+                    end
+                    return nil
+                end)
+                struct = struct:GetSuperStruct()
+                depth = depth + 1
+            end
+        end)
+        log(ok and "INFO" or "WARN", "spawn_surface", {
+            candidate = class_name,
+            object = full_name(object),
+            count = count,
+            error = error_value or "",
+        })
+    end
+end
+
+local function trace_object_surface(label, object)
+    object = unwrap(object)
+    if not is_valid(object) then
+        log("WARN", "object_surface", {
+            label = label,
+            reason = "invalid-object",
+        })
         return
     end
-    if local_selection.expires < now_ms() then
-        log("WARN", "deep_model_not_configured", {reason = "selection-expired"})
-        local_selection = nil
-        local_deep_model_budget = 0
+    local class = object:GetClass()
+    local class_name = full_name(class)
+    if traced_object_classes[class_name] then
         return
     end
-    local before_range = model.GaugeRange
-    local before_speed = model.CursorSpeed
+    traced_object_classes[class_name] = true
+    local properties = 0
+    local functions = 0
     local ok, error_value = pcall(function()
-        model.GaugeRange = CONFIG.deep_gauge_range_percent
-        model.CursorSpeed = CONFIG.deep_cursor_percent_speed
+        local struct = class
+        local depth = 0
+        while is_valid(struct) and depth < 4 and
+            properties + functions < 180 do
+            struct:ForEachFunction(function(func)
+                if properties + functions >= 180 then
+                    return true
+                end
+                local name = tostring(func:GetFName():ToString())
+                if string.find(name, "Add", 1, true) or
+                    string.find(name, "Item", 1, true) or
+                    string.find(name, "Container", 1, true) or
+                    string.find(name, "Obtain", 1, true) or
+                    string.find(name, "Slot", 1, true) or
+                    string.find(name, "Spawn", 1, true) or
+                    string.find(name, "Wanted", 1, true) or
+                    string.find(name, "Police", 1, true) or
+                    string.find(name, "Crime", 1, true) then
+                    functions = functions + 1
+                    log("DEBUG", "object_function", {
+                        label = label,
+                        class = class_name,
+                        depth = depth,
+                        name = name,
+                        full_name = tostring(func:GetFullName()),
+                    })
+                end
+                return nil
+            end)
+            struct:ForEachProperty(function(property)
+                if properties + functions >= 180 then
+                    return true
+                end
+                properties = properties + 1
+                local name = tostring(property:GetFName():ToString())
+                local value_ok, value = pcall(function()
+                    return unwrap(object:GetPropertyValue(name))
+                end)
+                log("DEBUG", "object_property", {
+                    label = label,
+                    class = class_name,
+                    depth = depth,
+                    name = name,
+                    value = value_ok and
+                        (is_valid(value) and full_name(value) or tostring(value)) or
+                        "<unreadable>",
+                })
+                return nil
+            end)
+            struct = struct:GetSuperStruct()
+            depth = depth + 1
+        end
     end)
-    if ok then
-        local_deep_model_budget = local_deep_model_budget - 1
+    log(ok and "INFO" or "ERROR", "object_surface", {
+        label = label,
+        class = class_name,
+        properties = properties,
+        functions = functions,
+        error = error_value or "",
+    })
+end
+
+local function trace_reward_surfaces(attempt, model)
+    trace_object_surface("inventory", get_inventory(attempt.controller))
+    pcall(function()
+        trace_object_surface(
+            "inventory.multi_helper",
+            get_inventory(attempt.controller).InventoryMultiHelper
+        )
+    end)
+    pcall(function()
+        trace_object_surface(
+            "inventory.container_module",
+            get_inventory(attempt.controller):GetItemContainerModule()
+        )
+    end)
+    pcall(function()
+        trace_object_surface(
+            "model.container_module",
+            model:GetItemContainerModule()
+        )
+    end)
+    pcall(function()
+        trace_object_surface(
+            "model.container_access",
+            model:GetItemContainerAccess()
+        )
+    end)
+end
+
+local function dump_model_properties(model)
+    local count = 0
+    local ok, error_value = pcall(function()
+        local struct = model:GetClass()
+        local depth = 0
+        while is_valid(struct) and depth < 8 and count < 64 do
+            struct:ForEachProperty(function(property)
+                if count >= 64 then
+                    return true
+                end
+                count = count + 1
+                local property_name =
+                    tostring(property:GetFName():ToString())
+                local value_ok, value = pcall(function()
+                    return unwrap(model:GetPropertyValue(property_name))
+                end)
+                local display = "<unreadable>"
+                if value_ok then
+                    if is_valid(value) then
+                        display = full_name(value)
+                    else
+                        display = tostring(value)
+                    end
+                end
+                log("DEBUG", "model_property", {
+                    depth = depth,
+                    name = property_name,
+                    value = display,
+                })
+                return nil
+            end)
+            struct = struct:GetSuperStruct()
+            depth = depth + 1
+        end
+    end)
+    log(ok and "INFO" or "ERROR", "model_property_dump", {
+        count = count,
+        error = error_value or "",
+    })
+end
+
+local function dump_model_functions(model)
+    local count = 0
+    local ok, error_value = pcall(function()
+        local struct = model:GetClass()
+        local depth = 0
+        while is_valid(struct) and depth < 4 and count < 96 do
+            struct:ForEachFunction(function(func)
+                if count >= 96 then
+                    return true
+                end
+                count = count + 1
+                log("DEBUG", "model_function", {
+                    depth = depth,
+                    name = tostring(func:GetFName():ToString()),
+                })
+                return nil
+            end)
+            struct = struct:GetSuperStruct()
+            depth = depth + 1
+        end
+    end)
+    log(ok and "INFO" or "ERROR", "model_function_dump", {
+        count = count,
+        error = error_value or "",
+    })
+end
+
+local function dump_function_signature(path)
+    local count = 0
+    local ok, error_value = pcall(function()
+        local func = StaticFindObject(path)
+        if not is_valid(func) then
+            error("function-not-found")
+        end
+        func:ForEachProperty(function(property)
+            count = count + 1
+            log("DEBUG", "function_parameter", {
+                function_path = path,
+                index = count,
+                property = tostring(property:GetFullName()),
+            })
+            pcall(function()
+                local nested_struct = property:GetStruct()
+                nested_struct:ForEachProperty(function(nested_property)
+                    log("DEBUG", "function_struct_field", {
+                        function_path = path,
+                        parameter = tostring(
+                            property:GetFName():ToString()
+                        ),
+                        property = tostring(nested_property:GetFullName()),
+                    })
+                    return nil
+                end)
+            end)
+            return nil
+        end)
+    end)
+    log(ok and "INFO" or "ERROR", "function_signature", {
+        function_path = path,
+        count = count,
+        error = error_value or "",
+    })
+end
+
+local function find_salvage_parameter_component(model)
+    local actor = nil
+    pcall(function()
+        actor = unwrap(model:GetActor())
+    end)
+    if not is_valid(actor) then
+        return nil
     end
-    log(ok and "INFO" or "ERROR", "deep_model_configured", {
-        model = full_name(model),
-        range_before = before_range,
-        range_after = ok and model.GaugeRange or "unchanged",
-        speed_before = before_speed,
-        speed_after = ok and model.CursorSpeed or "unchanged",
+    local actor_name = full_name(actor)
+    local ok, components = pcall(function()
+        return FindObjects(
+            0,
+            "PalMapObjectTreasureBoxSalvageParameterComponent",
+            nil,
+            nil,
+            nil,
+            false
+        )
+    end)
+    if not ok or type(components) ~= "table" then
+        return nil
+    end
+    for _, component in ipairs(components) do
+        if is_valid(component) then
+            local component_owner = get_owner(component)
+            if is_valid(component_owner) and
+                full_name(component_owner) == actor_name then
+                return component
+            end
+        end
+    end
+    return nil
+end
+
+local function get_salvage_item_container(model)
+    local container = nil
+    pcall(function()
+        local module = unwrap(model:GetItemContainerModule())
+        if is_valid(module) then
+            container = unwrap(module.TargetContainer)
+        end
+    end)
+    return is_valid(container) and container or nil
+end
+
+local function trace_salvage_slots(model, phase)
+    local container = get_salvage_item_container(model)
+    if not is_valid(container) then
+        log("WARN", "salvage_slot_snapshot", {
+            phase = phase,
+            reason = "container-unavailable",
+        })
+        return
+    end
+    local count = 0
+    local ok, error_value = pcall(function()
+        local slots = container.ItemSlotArray
+        count = #slots
+        for index = 1, math.min(count, 32) do
+            local slot = unwrap(slots[index])
+            local fields = {
+                phase = phase,
+                container = full_name(container),
+                index = index,
+                slot = full_name(slot),
+            }
+            if is_valid(slot) then
+                local property_count = 0
+                slot:GetClass():ForEachProperty(function(property)
+                    if property_count >= 24 then
+                        return true
+                    end
+                    property_count = property_count + 1
+                    local name = tostring(property:GetFName():ToString())
+                    local value_ok, value = pcall(function()
+                        return unwrap(slot:GetPropertyValue(name))
+                    end)
+                    if value_ok then
+                        fields[name] = is_valid(value) and
+                            full_name(value) or tostring(value)
+                    end
+                    return nil
+                end)
+            end
+            log("DEBUG", "salvage_slot", fields)
+        end
+    end)
+    log(ok and "INFO" or "ERROR", "salvage_slot_snapshot", {
+        phase = phase,
+        container = full_name(container),
+        count = count,
+        error = error_value or "",
+    })
+end
+
+salvage_slot_item_id = function(slot)
+    local ok, value = pcall(function()
+        return name_string(unwrap(slot.ItemId.StaticId))
+    end)
+    return ok and value or "<unknown-item>"
+end
+
+local function apply_container_reward(attempt, model)
+    local container = get_salvage_item_container(model)
+    if not is_valid(container) then
+        return false, "container-unavailable"
+    end
+    local jellroy_multiplier, passive_status =
+        get_jellroy_multiplier(attempt.controller)
+    local jellroy_bonus = math.max(0.0, jellroy_multiplier - 1.0)
+    local comparisons = {}
+    local originals = {}
+    local changed = 0
+    local ok, error_value = pcall(function()
+        local slots = container.ItemSlotArray
+        for index = 1, math.min(#slots, 32) do
+            local slot = unwrap(slots[index])
+            if is_valid(slot) then
+                local vanilla_after_jellroy =
+                    tonumber(slot.StackCount) or 0
+                if vanilla_after_jellroy > 0 then
+                    local estimated_base = round_quantity(
+                        vanilla_after_jellroy / jellroy_multiplier
+                    )
+                    local expected = round_quantity(
+                        estimated_base *
+                        (1.0 + jellroy_bonus + CONFIG.reward_bonus)
+                    )
+                    table.insert(originals, {
+                        slot = slot,
+                        count = vanilla_after_jellroy,
+                    })
+                    slot.StackCount = expected
+                    local actual = tonumber(slot.StackCount) or -1
+                    if actual ~= expected then
+                        error("stack-write-verification-failed")
+                    end
+                    local item = salvage_slot_item_id(slot)
+                    local comparison = string.format(
+                        "%s: base %d -> Jellroy %d (x%.2f) -> final %d",
+                        item,
+                        estimated_base,
+                        vanilla_after_jellroy,
+                        jellroy_multiplier,
+                        actual
+                    )
+                    table.insert(comparisons, comparison)
+                    changed = changed + 1
+                    log("INFO", "container_reward_item", {
+                        model = attempt.model,
+                        index = index,
+                        item = item,
+                        original_base = estimated_base,
+                        vanilla_after_jellroy = vanilla_after_jellroy,
+                        jellroy_multiplier =
+                            string.format("%.4f", jellroy_multiplier),
+                        passive_status = passive_status,
+                        final_after_modifiers = actual,
+                        formula_match = true,
+                    })
+                end
+            end
+        end
+    end)
+    if not ok or changed == 0 then
+        for _, original in ipairs(originals) do
+            pcall(function()
+                original.slot.StackCount = original.count
+            end)
+        end
+        return false, error_value or "no-populated-reward-slots"
+    end
+    attempt.reward_originals = originals
+    attempt.reward_comparisons = comparisons
+    attempt.reward_applied = true
+    return true, nil
+end
+
+local function restore_container_reward(attempt)
+    for _, original in ipairs(attempt.reward_originals or {}) do
+        pcall(function()
+            if is_valid(original.slot) then
+                original.slot.StackCount = original.count
+            end
+        end)
+    end
+    attempt.reward_applied = false
+end
+
+local function apply_server_difficulty(model)
+    local component = find_salvage_parameter_component(model)
+    if not is_valid(component) then
+        return nil, "missing-salvage-parameter-component"
+    end
+    local state = {
+        component = component,
+        range_before = component.GaugeRangePercent,
+        speed_before = component.CursorPercentSpeed,
+    }
+    local ok, error_value = pcall(function()
+        component.GaugeRangePercent =
+            CONFIG.difficult_gauge_range_percent
+        component.CursorPercentSpeed =
+            CONFIG.difficult_cursor_percent_speed
+    end)
+    if not ok then
+        return nil, tostring(error_value)
+    end
+    state.range_after = component.GaugeRangePercent
+    state.speed_after = component.CursorPercentSpeed
+    return state, nil
+end
+
+local function restore_server_difficulty(attempt)
+    local state = attempt and attempt.difficulty_state or nil
+    if state == nil or not is_valid(state.component) then
+        return
+    end
+    local ok, error_value = pcall(function()
+        state.component.GaugeRangePercent = state.range_before
+        state.component.CursorPercentSpeed = state.speed_before
+    end)
+    log(ok and "INFO" or "ERROR", "difficulty_restored", {
+        model = attempt.model,
+        range = state.range_before,
+        speed = state.speed_before,
         error = error_value or "",
     })
 end
 
 local function on_request_open(model, request_player_id)
+    model = unwrap(model)
+    if CONFIG.debug_enabled and not callback_seen.request_open then
+        callback_seen.request_open = true
+        log("INFO", "request_open_seen", {
+            model = full_name(model),
+            owner = full_name(get_owner(model)),
+            fishing_salvage = is_fishing_salvage(model),
+        })
+        dump_model_properties(model)
+        dump_model_functions(model)
+    end
+    if not is_fishing_salvage(model) then
+        return
+    end
+
     local player_id = tonumber(unwrap(request_player_id))
-    local state = player_id and server_selections_by_player[player_id] or nil
-    if state == nil or state.expires < now_ms() then
+    local model_key = full_name(model)
+    local salvage_location = nil
+    pcall(function()
+        local actor = unwrap(model:GetActor())
+        salvage_location = unwrap(actor:K2_GetActorLocation())
+    end)
+    if salvage_location == nil then
+        pcall(function()
+            local controller = find_controller_by_player_id(player_id)
+            local character = unwrap(
+                controller:GetDefaultPlayerCharacter()
+            )
+            salvage_location = unwrap(character:K2_GetActorLocation())
+        end)
+    end
+    local controller = player_id and
+        find_controller_by_player_id(player_id) or nil
+    local selected = roll(CONFIG.modifier_chance)
+    local magnet_snapshot = nil
+    local snapshot_error = nil
+    if selected then
+        magnet_snapshot, snapshot_error = capture_magnet_slots(model)
+    end
+    local modifier_active = selected and magnet_snapshot ~= nil
+    attempts_by_model[model_key] = {
+        model = model_key,
+        player_id = player_id,
+        controller = controller,
+        salvage_location = salvage_location,
+        started = now_ms(),
+        expires = now_ms() + CONFIG.attempt_timeout_ms,
+        modifier_selected = modifier_active,
+        reward_selected = modifier_active,
+        reward_applied = false,
+        risk_failure_chance = CONFIG.risk_failure_chance,
+        risk_collapsed = false,
+        magnet_snapshot = magnet_snapshot,
+        extra_magnet_consumed = false,
+        result_processed = false,
+    }
+    if selected and magnet_snapshot == nil then
+        attempts_by_model[model_key].failure_reason =
+            "snapshot-fail-closed:" .. tostring(snapshot_error)
+    end
+    if modifier_active then
+        local attempt = attempts_by_model[model_key]
+        if CONFIG.debug_enabled then
+            trace_reward_surfaces(attempt, model)
+            trace_salvage_slots(model, "request_open_pre")
+        end
+        local reward_ok, reward_error =
+            apply_container_reward(attempt, model)
+        if not reward_ok then
+            modifier_active = false
+            attempt.modifier_selected = false
+            attempt.reward_selected = false
+            attempt.failure_reason =
+                "reward-fail-closed:" .. tostring(reward_error)
+        end
+    end
+end
+
+local function on_request_open_post(model, request_player_id)
+    model = unwrap(model)
+    if not is_fishing_salvage(model) then
         return
     end
     local model_key = full_name(model)
-    server_attempts_by_model[model_key] = {
-        player_id = player_id,
-        controller = state.controller or find_controller_by_player_id(player_id),
-        started = now_ms(),
-        expires = now_ms() + CONFIG.attempt_timeout_ms,
-        reward_applied = false,
-        result_processed = false,
-        magnet_before = state.magnet_before,
-    }
-    state.expires = 0
-    log("INFO", "deep_attempt_bound", {
+    local attempt = attempts_by_model[model_key]
+    if attempt == nil then
+        return
+    end
+    local selected = attempt.modifier_selected
+    local modifier_active = selected
+    if selected then
+        local risk_ok, risk_error =
+            consume_from_vanilla_source(attempt)
+        attempt.extra_magnet_consumed = risk_ok
+        if not risk_ok then
+            modifier_active = false
+            attempt.failure_reason =
+                "risk-fail-closed:" .. tostring(risk_error)
+            if attempt.reward_applied then
+                restore_container_reward(attempt)
+            end
+        end
+    end
+    attempt.modifier_selected = modifier_active
+    attempt.reward_selected = modifier_active
+    log(
+        selected and not modifier_active and "WARN" or "INFO",
+        "modifier_roll",
+        {
         model = model_key,
-        player_id = player_id,
-        controller = full_name(server_attempts_by_model[model_key].controller),
-        magnet_before = server_attempts_by_model[model_key].magnet_before,
+        player_id = attempt.player_id or
+            tonumber(unwrap(request_player_id)) or "unknown",
+        selected = modifier_active,
+        rolled = selected,
+        chance = CONFIG.modifier_chance,
+        risk_failure_chance = CONFIG.risk_failure_chance,
+        reason = attempt.failure_reason or "",
     })
+    if modifier_active then
+        notify_deep_salvage()
+    end
 end
 
-local function get_jellroy_multiplier(controller)
+get_jellroy_multiplier = function(controller)
     controller = unwrap(controller)
     if not is_valid(controller) then
         return 1.0, "invalid-controller"
@@ -629,32 +1100,47 @@ end
 
 local function item_static_id(item)
     local ok, value = pcall(function()
-        return name_string(item.ItemId.StaticId)
+        local static_id = unwrap(item.ItemId.StaticId)
+        local text_ok, text = pcall(function()
+            return static_id:ToString()
+        end)
+        return text_ok and tostring(text) or tostring(static_id)
     end)
     return ok and value or "<unknown-item>"
 end
 
-local function round_quantity(value)
+round_quantity = function(value)
     return math.floor(value + 0.5)
 end
 
-local function apply_deep_reward(model, return_value)
+local function apply_random_reward(model, return_value)
+    if not callback_seen.create_items then
+        callback_seen.create_items = true
+        log("INFO", "create_items_seen", {
+            model = full_name(model),
+            owner = full_name(get_owner(model)),
+            fishing_salvage = is_fishing_salvage(model),
+        })
+    end
     local model_key = full_name(model)
-    local attempt = server_attempts_by_model[model_key]
-    if attempt == nil or attempt.reward_applied or
-        attempt.expires < now_ms() then
+    local attempt = attempts_by_model[model_key]
+    if attempt == nil or not attempt.reward_selected or
+        attempt.reward_applied or attempt.expires < now_ms() then
         return
     end
+
     local items = unwrap(return_value)
     if items == nil then
         log("ERROR", "reward_array_missing", {model = model_key})
         return
     end
+
     local jellroy_multiplier, passive_status =
         get_jellroy_multiplier(attempt.controller)
     local jellroy_bonus = math.max(0.0, jellroy_multiplier - 1.0)
     local changed = 0
     local formula_matches = true
+    local comparisons = {}
     local ok, error_value = pcall(function()
         for index = 1, #items do
             local item = items[index]
@@ -663,268 +1149,298 @@ local function apply_deep_reward(model, return_value)
                 round_quantity(vanilla_after_jellroy / jellroy_multiplier)
             local expected = round_quantity(
                 estimated_base *
-                (1.0 + jellroy_bonus + CONFIG.deep_reward_bonus)
+                (1.0 + jellroy_bonus + CONFIG.reward_bonus)
             )
-            local final = expected
-            item.Num = final
+            item.Num = expected
             local actual = tonumber(item.Num) or -1
-            local match = actual == expected
-            formula_matches = formula_matches and match
+            local formula_match = actual == expected
+            formula_matches = formula_matches and formula_match
             changed = changed + 1
-            log(match and "INFO" or "ERROR", "reward_formula_item", {
-                model = model_key,
-                player_id = attempt.player_id,
-                index = index,
-                item = item_static_id(item),
-                vanilla_after_jellroy = vanilla_after_jellroy,
-                estimated_base = estimated_base,
-                jellroy_multiplier =
-                    string.format("%.4f", jellroy_multiplier),
-                jellroy_bonus = string.format("%.4f", jellroy_bonus),
-                deep_bonus =
-                    string.format("%.4f", CONFIG.deep_reward_bonus),
-                expected_final = expected,
-                actual_final = actual,
-                formula_match = match,
-                passive_status = passive_status,
-            })
+            table.insert(comparisons, string.format(
+                "%s: base %d -> Jellroy %d (x%.2f) -> final %d",
+                item_static_id(item),
+                estimated_base,
+                vanilla_after_jellroy,
+                jellroy_multiplier,
+                actual
+            ))
+            log(
+                formula_match and "INFO" or "ERROR",
+                "reward_formula_item",
+                {
+                    model = model_key,
+                    player_id = attempt.player_id or "unknown",
+                    index = index,
+                    item = item_static_id(item),
+                    vanilla_after_jellroy = vanilla_after_jellroy,
+                    estimated_base = estimated_base,
+                    jellroy_multiplier =
+                        string.format("%.4f", jellroy_multiplier),
+                    random_bonus =
+                        string.format("%.4f", CONFIG.reward_bonus),
+                    expected_final = expected,
+                    actual_final = actual,
+                    formula_match = formula_match,
+                    passive_status = passive_status,
+                }
+            )
         end
     end)
     attempt.reward_applied = ok and changed > 0 and formula_matches
-    log(attempt.reward_applied and "INFO" or "ERROR", "reward_formula_summary", {
-        model = model_key,
-        player_id = attempt.player_id,
-        items_changed = changed,
-        formula_match = formula_matches,
-        reward_applied = attempt.reward_applied,
-        error = error_value or "",
-    })
+    log(
+        attempt.reward_applied and "INFO" or "ERROR",
+        "reward_formula_summary",
+        {
+            model = model_key,
+            player_id = attempt.player_id or "unknown",
+            items_changed = changed,
+            formula_match = formula_matches,
+            reward_applied = attempt.reward_applied,
+            reward_comparison = table.concat(comparisons, "; "),
+            error = error_value or "",
+        }
+    )
     if ok then
         return items
     end
 end
 
-local function consume_failure_magnet(attempt, reason)
-    local controller = attempt.controller
-    local inventory = get_inventory(controller)
-    if not is_valid(inventory) then
-        log("ERROR", "magnet_consume_failed", {
-            player_id = attempt.player_id,
-            reason = "missing-inventory",
-            outcome = reason,
-        })
-        return false
+local function begin_salvage_result(model, result)
+    local model_key = full_name(model)
+    local attempt = attempts_by_model[model_key]
+    if attempt == nil or not attempt.reward_selected then
+        active_reward_attempt = nil
+        return
     end
-    local before = get_magnet_count(controller)
-    if before == nil or before < 1 then
-        log("ERROR", "magnet_consume_failed", {
-            player_id = attempt.player_id,
-            reason = "insufficient-before-consume",
-            count_before = before or "unavailable",
-            outcome = reason,
+    local reported_success = unwrap(result)
+    if reported_success and roll(attempt.risk_failure_chance) then
+        local changed = set_param(result, false)
+        attempt.risk_collapsed = changed
+        log(changed and "WARN" or "ERROR", "salvage_risk_roll", {
+            model = model_key,
+            player_id = attempt.player_id or "unknown",
+            reported_success = reported_success,
+            collapsed = changed,
+            chance = attempt.risk_failure_chance,
         })
-        return false
+        if changed then
+            notify_debug("WARN", "salvage_collapsed", {
+                risk = "server rejected recovery; no reward awarded",
+            })
+            active_reward_attempt = nil
+            return
+        end
     end
-    local ok, operation = pcall(function()
-        return inventory:AddItem_ServerInternal(
-            FName(CONFIG.magnet_item_id),
-            -1,
-            false,
-            0,
-            false
-        )
-    end)
-    local after = get_magnet_count(controller)
-    local observed_delta =
-        before ~= nil and after ~= nil and (after - before) or nil
-    local verified = ok and observed_delta == -1
-    log(verified and "INFO" or "ERROR", "magnet_consume_audit", {
-        player_id = attempt.player_id,
-        item = CONFIG.magnet_item_id,
-        outcome = reason,
-        count_before = before,
-        count_after = after or "unavailable",
-        expected_delta = -1,
-        observed_delta = observed_delta or "unavailable",
-        verified = verified,
-        operation = operation or "",
+    if not reported_success then
+        active_reward_attempt = nil
+        return
+    end
+    active_reward_attempt = attempt
+    if CONFIG.debug_enabled then
+        trace_salvage_slots(unwrap(model), "result_pre")
+    end
+    log("DEBUG", "reward_window_open", {
+        model = model_key,
+        player_id = attempt.player_id or "unknown",
+        inventory = full_name(get_inventory(attempt.controller)),
     })
-    return verified
+end
+
+local function on_inventory_add(inventory, static_item_id, count)
+    local attempt = active_reward_attempt
+    if attempt == nil or not attempt.reward_selected then
+        return
+    end
+    local expected_inventory = get_inventory(attempt.controller)
+    inventory = unwrap(inventory)
+    if not is_valid(inventory) or not is_valid(expected_inventory) or
+        full_name(inventory) ~= full_name(expected_inventory) then
+        return
+    end
+
+    local vanilla_after_jellroy = tonumber(unwrap(count))
+    if vanilla_after_jellroy == nil or vanilla_after_jellroy <= 0 then
+        return
+    end
+    local jellroy_multiplier, passive_status =
+        get_jellroy_multiplier(attempt.controller)
+    local jellroy_bonus = math.max(0.0, jellroy_multiplier - 1.0)
+    local estimated_base =
+        round_quantity(vanilla_after_jellroy / jellroy_multiplier)
+    local expected = round_quantity(
+        estimated_base *
+        (1.0 + jellroy_bonus + CONFIG.reward_bonus)
+    )
+    local changed = set_param(count, expected)
+    local comparison = string.format(
+        "%s: base %d -> Jellroy %d (x%.2f) -> final %d",
+        name_string(static_item_id),
+        estimated_base,
+        vanilla_after_jellroy,
+        jellroy_multiplier,
+        expected
+    )
+    if changed then
+        attempt.reward_applied = true
+        table.insert(attempt.reward_comparisons, comparison)
+    end
+    log(changed and "INFO" or "ERROR", "inventory_reward_item", {
+        model = attempt.model,
+        player_id = attempt.player_id or "unknown",
+        item = name_string(static_item_id),
+        original_base = estimated_base,
+        vanilla_after_jellroy = vanilla_after_jellroy,
+        jellroy_multiplier = string.format("%.4f", jellroy_multiplier),
+        passive_status = passive_status,
+        final_after_modifiers = expected,
+        changed = changed,
+    })
+end
+
+local function on_obtain_info(model, ...)
+    local values = {...}
+    local fields = {
+        model = full_name(model),
+        argument_count = #values,
+    }
+    for index = 1, math.min(#values, 8) do
+        local value = unwrap(values[index])
+        fields["arg" .. index] = is_valid(value) and
+            full_name(value) or tostring(value)
+    end
+    log("INFO", "obtain_info_seen", fields)
 end
 
 local function on_salvage_result(model, result)
+    if not callback_seen.salvage_result then
+        callback_seen.salvage_result = true
+        log("INFO", "salvage_result_seen", {
+            model = full_name(model),
+            owner = full_name(get_owner(model)),
+            fishing_salvage = is_fishing_salvage(model),
+        })
+    end
     local model_key = full_name(model)
-    local attempt = server_attempts_by_model[model_key]
+    local attempt = attempts_by_model[model_key]
     if attempt == nil or attempt.result_processed then
         return
     end
     local success = unwrap(result) == true
     attempt.result_processed = true
-    local magnet_verified = true
-    if not success then
-        magnet_verified = consume_failure_magnet(attempt, "failure")
+    active_reward_attempt = nil
+    if not success and attempt.reward_applied then
+        restore_container_reward(attempt)
     end
-    log("INFO", "deep_attempt_result", {
+    local comparisons = attempt.reward_comparisons or {}
+    log(
+        success and attempt.reward_selected and
+            not attempt.reward_applied and "ERROR" or "INFO",
+        "reward_formula_summary",
+        {
+            model = model_key,
+            player_id = attempt.player_id or "unknown",
+            formula_match = attempt.reward_applied or
+                not attempt.reward_selected or not success,
+            reward_applied = attempt.reward_applied,
+            reward_comparison = table.concat(comparisons, "; "),
+            reason = success and attempt.reward_selected and
+                not attempt.reward_applied and
+                "no-matching-inventory-add" or "",
+        }
+    )
+    log("INFO", "salvage_attempt_result", {
         model = model_key,
-        player_id = attempt.player_id,
+        player_id = attempt.player_id or "unknown",
         success = success,
+        reward_selected = attempt.reward_selected,
         reward_applied = attempt.reward_applied,
-        failure_magnet_verified = magnet_verified,
+        risk_collapsed = attempt.risk_collapsed,
+        extra_magnet_consumed = attempt.extra_magnet_consumed or false,
         duration_ms = now_ms() - attempt.started,
     })
-    server_attempts_by_model[model_key] = nil
-    local_selection = nil
+    attempts_by_model[model_key] = nil
 end
 
-local function on_cancel_salvage(network_component)
-    local controller = get_owner(network_component)
-    local player_id = get_player_id(controller)
-    log("WARN", "salvage_cancel_requested", {
-        controller = full_name(controller),
-        player_id = player_id or "unknown",
-        note = "awaiting authoritative false result before charging",
-    })
-end
-
-local function register_hook(name, path, callback)
-    local ok, first, second = pcall(RegisterHook, path, callback)
-    hook_status[name] = ok
+local function register_hook(name, path, callback, post)
+    local ok, first, second
+    if post then
+        ok, first, second = pcall(RegisterHook, path, function()
+        end, callback)
+    else
+        ok, first, second = pcall(RegisterHook, path, callback)
+    end
     log(ok and "INFO" or "ERROR", "hook_registration", {
         hook = name,
         path = path,
         ok = ok,
         pre_id = first or "",
         post_id = second or "",
+        phase = post and "post" or "pre",
     })
     return ok
 end
 
-local function register_post_hook(name, path, callback)
-    local ok, first, second = pcall(
-        RegisterHook,
-        path,
-        function()
-        end,
-        callback
-    )
-    hook_status[name] = ok
-    log(ok and "INFO" or "ERROR", "hook_registration", {
-        hook = name,
-        path = path,
-        ok = ok,
-        pre_id = first or "",
-        post_id = second or "",
-        phase = "post",
-    })
-    return ok
-end
-
-local function register_hooks()
-    -- Palworld revision 82182 crashes inside UE4SS before callbacks run when
-    -- these interface functions are detoured. Keep the implementation for
-    -- reference, but fail closed by not registering either hook.
-    hook_status.get_indicator_info = false
-    hook_status.get_indicator_text = false
-    log("WARN", "interaction_option_disabled", {
-        reason = "unsafe-interface-detour",
-        revision = 82182,
-    })
-    register_hook(
-        "trigger_interact",
-        PATHS.trigger_interact,
-        on_start_trigger_interact
-    )
-    register_hook("chat_receive", PATHS.chat_receive, on_chat_receive)
-    register_hook("request_open", PATHS.request_open, on_request_open)
-    register_hook("salvage_result", PATHS.salvage_result, on_salvage_result)
-    register_hook("create_items", PATHS.create_items, apply_deep_reward)
-    register_hook("cancel_salvage", PATHS.cancel_salvage, on_cancel_salvage)
-
-    local ok, error_value = pcall(
-        NotifyOnNewObject,
-        "/Script/Pal.PalUIMapObjectTreasureBoxSalvageGameModel",
-        configure_salvage_model
-    )
-    hook_status.salvage_model_notify = ok
-    log(ok and "INFO" or "ERROR", "object_notification_registration", {
-        class =
-            "/Script/Pal.PalUIMapObjectTreasureBoxSalvageGameModel",
-        ok = ok,
-        error = error_value or "",
-    })
-end
-
-local function cleanup_expired_state()
+local function cleanup_expired_attempts()
     local now = now_ms()
-    for player_id, state in pairs(server_selections_by_player) do
-        if state.expires ~= 0 and state.expires < now then
-            log("WARN", "deep_selection_expired", {player_id = player_id})
-            state.expires = 0
-        end
-    end
-    for model_key, attempt in pairs(server_attempts_by_model) do
+    for model_key, attempt in pairs(attempts_by_model) do
         if attempt.expires < now then
-            log("ERROR", "deep_attempt_expired", {
+            log("WARN", "salvage_attempt_expired", {
                 model = model_key,
-                player_id = attempt.player_id,
+                player_id = attempt.player_id or "unknown",
+                reward_selected = attempt.reward_selected,
                 reward_applied = attempt.reward_applied,
-                result_processed = attempt.result_processed,
             })
-            server_attempts_by_model[model_key] = nil
+            if attempt.reward_applied then
+                restore_container_reward(attempt)
+            end
+            attempts_by_model[model_key] = nil
         end
-    end
-    if local_selection ~= nil and local_selection.expires < now then
-        log("WARN", "local_selection_expired", {
-            target = local_selection.target,
-        })
-        local_selection = nil
-        local_deep_model_budget = 0
-    end
-
-    if performance.selection_checks > 0 and
-        now - performance.last_report_ms >=
-            CONFIG.performance_report_interval_ms then
-        local hit_rate = performance.selection_checks > 0 and
-            performance.salvage_cache_hits /
-                performance.selection_checks or 0
-        log("DEBUG", "performance_counters", {
-            interval_ms = now - performance.last_report_ms,
-            indicator_checks = performance.indicator_checks,
-            indicator_mutations = performance.indicator_mutations,
-            selection_checks = performance.selection_checks,
-            salvage_cache_hits = performance.salvage_cache_hits,
-            salvage_cache_misses = performance.salvage_cache_misses,
-            salvage_cache_hit_rate = string.format("%.4f", hit_rate),
-        })
-        performance.selection_checks = 0
-        performance.indicator_checks = 0
-        performance.indicator_mutations = 0
-        performance.salvage_cache_hits = 0
-        performance.salvage_cache_misses = 0
-        performance.last_report_ms = now
     end
 end
 
-local function has_active_runtime_work()
-    if local_selection ~= nil or
-        next(server_attempts_by_model) ~= nil or
-        performance.selection_checks > 0 then
-        return true
-    end
-    for _, state in pairs(server_selections_by_player) do
-        if state.expires ~= 0 then
-            return true
-        end
-    end
-    return false
-end
+register_hook("request_open", PATHS.request_open, on_request_open, false)
+register_hook(
+    "request_open_post",
+    PATHS.request_open,
+    on_request_open_post,
+    true
+)
+register_hook(
+    "salvage_result_begin",
+    PATHS.salvage_result,
+    begin_salvage_result,
+    false
+)
+register_hook("salvage_result", PATHS.salvage_result, on_salvage_result, true)
+register_hook("create_items", PATHS.create_items, apply_random_reward, true)
+register_hook("add_item", PATHS.add_item, on_inventory_add, false)
 
-register_hooks()
+if CONFIG.debug_enabled then
+    register_hook("obtain_info", PATHS.obtain_info, on_obtain_info, false)
+    dump_function_signature(
+        "/Script/Pal.PalMapObjectTreasureBoxModel:OpenPickingGame_ClientInternal"
+    )
+    dump_function_signature(
+        "/Script/Pal.PalMapObjectTreasureBoxModel:ReceiveOpenSuccess_ClientInternal"
+    )
+    dump_function_signature(
+        "/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal"
+    )
+    dump_function_signature(PATHS.obtain_info)
+    dump_inventory_functions()
+    trace_object_surface(
+        "live_item_container",
+        FindFirstOf("PalItemContainer")
+    )
+end
+capture_magnet_slots({
+    TreasureGradeType = 1,
+})
 
 LoopAsync(1000, function()
     ExecuteInGameThread(function()
-        if has_active_runtime_work() then
-            cleanup_expired_state()
+        if next(attempts_by_model) ~= nil then
+            cleanup_expired_attempts()
         end
     end)
     return false
@@ -932,11 +1448,10 @@ end)
 
 log("INFO", "mod_loaded", {
     version = MOD_VERSION,
-    magnet_item = CONFIG.magnet_item_id,
-    deep_range = CONFIG.deep_gauge_range_percent,
-    deep_speed = CONFIG.deep_cursor_percent_speed,
-    deep_bonus = CONFIG.deep_reward_bonus,
+    modifier_chance = CONFIG.modifier_chance,
+    risk_failure_chance = CONFIG.risk_failure_chance,
+    extra_magnet_cost = CONFIG.extra_magnet_cost,
+    reward_bonus = CONFIG.reward_bonus,
+    deployment = "server-only",
     debug_enabled = CONFIG.debug_enabled,
-    debug_notifications = CONFIG.debug_notifications,
-    debug_console = CONFIG.debug_console,
 })

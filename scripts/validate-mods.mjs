@@ -43,8 +43,31 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(info.Version)) {
 if (!Array.isArray(info.InstallRule) || info.InstallRule.length === 0) {
   throw new Error(`${packageName}: Info.json requires at least one InstallRule`);
 }
-if (!existsSync(join(payloadRoot, info.Thumbnail))) {
+const thumbnailPath = join(payloadRoot, info.Thumbnail);
+if (!existsSync(thumbnailPath)) {
   throw new Error(`${packageName}: thumbnail '${info.Thumbnail}' is missing`);
+}
+const thumbnail = readFileSync(thumbnailPath);
+if (thumbnail.length < 24) {
+  throw new Error(`${packageName}: thumbnail must be a valid PNG of at least 24 bytes`);
+}
+const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+if (!thumbnail.subarray(0, 8).equals(pngSignature)) {
+  throw new Error(`${packageName}: thumbnail must be a PNG`);
+}
+if (thumbnail.length >= 1024 * 1024) {
+  throw new Error(
+    `${packageName}: thumbnail is ${thumbnail.length} bytes; ` +
+    'Steam Workshop previews must be strictly below 1 MiB'
+  );
+}
+const thumbnailWidth = thumbnail.readUInt32BE(16);
+const thumbnailHeight = thumbnail.readUInt32BE(20);
+if (thumbnailWidth !== thumbnailHeight) {
+  console.warn(
+    `${packageName}: prefer a square Workshop thumbnail; got ` +
+    `${thumbnailWidth}x${thumbnailHeight}`
+  );
 }
 
 const expectedType = modProject.ModType === 'Lua' ? 'Lua' : 'Paks';

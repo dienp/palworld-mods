@@ -22,6 +22,41 @@ Core `Info.json` fields:
 - `Dependencies`: package names, not display names.
 - `InstallRule`: loader type and relative source folders.
 
+## Thumbnail
+
+Keep the final square image at `package/<PackageName>/thumbnail.png` and ensure
+`Info.json` references `thumbnail.png`.
+
+When generating a thumbnail:
+
+1. Use authoritative screenshots or public gameplay references for featured
+   items, rewards, and mechanics.
+2. Use the `imagegen` skill to produce polished raster artwork.
+3. Represent recognizable Palworld items faithfully; do not substitute generic
+   objects when the item's design communicates the mechanic.
+4. Match Palworld's bright stylized 3D presentation without copying logos,
+   characters, or extracted game assets.
+5. Prefer one clear claim, large silhouettes, high contrast, and minimal exact
+   text that remains legible when reduced to a Workshop card.
+6. Resize or optimize the final preview so it is strictly below Steam's 1 MiB
+   `SubmitItemUpdate` limit while remaining legible.
+7. Inspect the final PNG, verify its item counts and spelling, copy it into the
+   package, increment the mod version, and run repository validation.
+
+Observed acceptance criteria:
+
+- Steam rejects previews at or above its size limit with
+  `k_EResultLimitExceeded`; this can also mean insufficient Steam Cloud quota,
+  but check preview size first.
+- Steam documents a valid preview range of at least 16 bytes and strictly less
+  than 1 MiB.
+- This repository requires a valid PNG below 1,048,576 bytes. Square artwork is
+  strongly recommended for Workshop-card presentation but is not treated as a
+  Steam acceptance requirement.
+- Prefer a high-quality 512x512 downscale for detailed generated artwork. Check
+  the reduced image visually: preserve the primary silhouettes, exact text,
+  contrast, and recognizable item details rather than merely minimizing bytes.
+
 Deployment targets:
 
 - Paks → `Pal/Content/Paks/~WorkshopMods/<PackageName>`

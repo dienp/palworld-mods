@@ -1,6 +1,6 @@
 ---
 name: init-palworld-mod
-description: Initialize, validate, and configure Palworld 1.0 mod projects with safe scaffolding, solution feasibility and performance gates, Workshop-compatible metadata, Paks/LogicMods/Lua/PalSchema selection, development versioning, toggleable diagnostics, packaging paths, and local tool discovery. Use when Codex needs to start, scaffold, bootstrap, design, debug, optimize, or standardize a Palworld mod.
+description: Initialize, validate, and configure Palworld 1.0 mod projects with safe scaffolding, solution feasibility and performance gates, Workshop-compatible metadata and thumbnails, Paks/LogicMods/Lua/PalSchema selection, development versioning, toggleable diagnostics, packaging paths, and local tool discovery. Use when Codex needs to start, scaffold, bootstrap, design, debug, optimize, package, or standardize a Palworld mod.
 ---
 
 # Initialize a Palworld mod
@@ -55,20 +55,34 @@ The script refuses to initialize a non-empty directory unless `-Force` is explic
 8. Research the smallest exact asset or runtime hook needed. Keep originals under `work/original` and generated overrides under `work/staging`.
 9. Package only intended override files. List and hash the resulting archive before installation.
 10. For official-loader testing, create/register a hidden Workshop item with Palworld Mod Uploader, then place package contents in that registered item. Do not invent numeric Workshop IDs.
-11. Increment `Version` for each distributed test build. Use loader
+11. Create the Workshop thumbnail with the `imagegen` skill when polished
+    raster art is appropriate:
+    - inspect the mod's actual in-game behavior and gather authoritative
+      visual references for featured Palworld items and rewards;
+    - use user screenshots or public gameplay references rather than
+      committing extracted game assets;
+    - avoid generic stand-ins when a recognizable in-game item is central to
+      the mod;
+    - favor bright, readable, stylized 3D forms, clean outlines, and short
+      exact text that remains legible at small Workshop-card size;
+    - verify item counts, reward types, text spelling, square composition, and
+      the final local `thumbnail.png` visually before packaging;
+    - ensure the final preview image is at least 16 bytes and strictly below
+      Steam's 1 MiB `SubmitItemUpdate` limit.
+12. Increment `Version` for each distributed test build. Use loader
    `DebugMode: true` during development and verify the uploader did not reset
    it.
-12. For Lua mods, retain runtime diagnostic switches in source:
+13. For Lua mods, retain runtime diagnostic switches in source:
    `debug_enabled`, `debug_notifications`, and `debug_console`. Enable all
    three for development. Prefer Palworld `PalLogManager:AddLog` notifications
    for player-visible diagnostics and console output for dedicated-server
    evidence. Add before/after values and explicit match flags around risky
    calculations or state mutations. Rate-limit or aggregate diagnostics in
    callbacks that may run repeatedly.
-13. For a production release, keep the diagnostic code and scaffold/package
+14. For a production release, keep the diagnostic code and scaffold/package
     with `-BuildMode Production`. This sets loader `DebugMode: false` and
     runtime `debug_enabled = false`; do not delete the instrumentation.
-14. Verify the deployed file and
+15. Verify the deployed file and
     `Mods/ManagedMods/<PackageName>/InstallManifest.json`, not merely the mod
     warning or menu entry. After deployment, use runtime evidence to confirm
     hook registration, event counts, authority, cleanup, and measured reward

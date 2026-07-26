@@ -1,67 +1,46 @@
 # Deep Salvage
 
-A Palworld 1.0 gameplay mod that adds **Deep Salvage**, a higher-risk salvage
-choice, without replacing the vanilla interaction.
+A server-only Lua Palworld gameplay mod that occasionally turns vanilla
+fishing salvage into a higher-cost, higher-reward Deep Salvage attempt for
+every connected client.
 
-## Development target
+## Behavior
 
-The next development version is intended to:
+Deep Salvage does not add another interaction. The normal **Salvage** action
+remains unchanged in the UI.
 
-- keep vanilla **Salvage** unchanged;
-- add **Deep Salvage**, requiring the same 1 Magnet;
-- give Deep Salvage a tighter success range and faster cursor;
-- improve rewards only after a successful Deep Salvage attempt;
-- permanently consume the Magnet when Deep Salvage fails or is abandoned;
-- preserve vanilla failure behavior.
+One authoritative configurable roll occurs when a fishing-salvage attempt
+opens:
 
-The validated target architecture is a native secondary-interaction component,
-a cooked salvage-specific asset that attaches it, and UE4SS Lua for
-hot-reloadable gameplay policy. Lua will carry the selected mode into the
-minigame and modify only the authoritative successful reward.
+- A selected roll requires one additional Fishing Magnet of the matching
+  salvage rank.
+- The same selected attempt receives a reward bonus if it succeeds.
 
-## Status
+The modifier applies to 100% of eligible salvage attempts. Each attempt costs
+two magnets in total (one vanilla plus one Deep Salvage cost) and receives +100% of the
+estimated base reward quantity while preserving any active Jellroy bonus.
 
-The crash-safe `0.1.0-dev.16` Lua package is installed, but the Deep Salvage
-interaction is not implemented yet. The prompt-only LogicMod bridge could not
-create an action, the UE4SS interface hook crashed when inspecting a salvage
-point, and PMK reflection confirmed that a cooked Blueprint alone cannot
-override the native action-info function.
-The hidden development Workshop item is `3771275627` (original uploader
-placeholder: `MyAwesomeMod`, author `ptd`). Its registered local directory
-must be populated only while Palworld is stopped.
+Production build `1.0.1` uses the 100% modifier chance with runtime
+diagnostics disabled.
 
-The current Lua entry point includes:
+## Safety
 
-- unsafe interface-level indicator hooks disabled after runtime crash evidence;
-- per-player and per-treasure attempt tracking;
-- harder salvage-model parameters;
-- failure-side Fishing Magnet consumption with before/after auditing;
-- additive Jellroy/Deep reward calculation with per-item formula auditing;
-- toggleable Palworld notification diagnostics, retained but disabled for
-  production releases;
-- cached hot-path object classification and Palworld log-manager lookup;
-- aggregated interaction performance counters without per-refresh log spam;
-- idle-aware state cleanup scheduling;
-- avoid retaining temporary hook parameters across game-thread scheduling;
-- no client/server version handshake or recurring protocol messages;
-- timeout cleanup and fail-closed hook registration.
-
-It deliberately does not register the unsafe interaction hooks. The next gate
-is a minimal native-component proof that creates `Interact2` and receives its
-callback without invoking Lua from the indicator-query hot path.
-
-The first native gate is implemented in [`native-proof/`](native-proof/). It
-uses a UE4SS C++ post-hook to avoid Lua parameter marshalling, copies the
-vanilla action metadata into `Interact2`, and logs the native
-`StartTriggerInteract(Interact2)` callback. It is source-only until it passes
-live client testing; no proof DLL is included in the Workshop payload.
+- No native DLL or cooked asset is distributed.
+- No interaction-interface hooks are registered.
+- Deep Salvage consumes exactly one additional rank-matched Fishing Magnet.
+- No chat or RPC control protocol is used.
+- Clients do not install the mod.
+- No UI is changed except one notification when a Deep Salvage attempt
+  successfully activates.
+- Reward changes are limited to fishing-junk salvage models identified by
+  their runtime object or owner name.
+- The modifier fails closed without consuming anything unless the player has
+  at least two matching magnets and the server can resolve their inventory.
+- Runtime diagnostics remain available through configuration.
 
 ## Layout
 
-- `docs/` — research and test records
-- `src/` — reproducible patch tooling
-- `work/original/` — extracted vanilla assets (ignored)
-- `work/staging/` — generated overrides (ignored)
-- `dist/` — packaged test builds (ignored)
-- `package/DeepSalvage/Scripts/` — UE4SS Lua entry point
-- `package/DeepSalvage/` — official-loader package metadata
+- `package/DeepSalvage/Scripts/main.lua` — UE4SS Lua entry point
+- `package/DeepSalvage/Info.json` — official-loader metadata
+- `docs/research.md` — design decisions and retired experiments
+- `docs/testing.md` — current validation checklist

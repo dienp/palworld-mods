@@ -28,4 +28,6 @@ This repository contains Palworld mods orchestrated by Nx.
 - Never commit copyrighted game assets.
 - Keep loose `~mods` tests separate from Workshop-managed tests.
 - Do not publish a Workshop item or GitHub release without explicit authorization.
+- Never close or terminate Palworld without explicit authorization from the
+  user at that time.
 - Back up saves before testing changes that may persist state.

@@ -2,8 +2,8 @@
     "ModName":  "Deep Salvage",
     "PackageName":  "DeepSalvage",
     "Thumbnail":  "thumbnail.png",
-    "Version":  "0.1.0-dev.16",
-    "DebugMode":  true,
+    "Version":  "1.0.1",
+    "DebugMode":  false,
     "MinRevision":  82182,
     "Author":  "ptd",
     "Dependencies":  [
