@@ -142,9 +142,9 @@ local function set_third_decimal(reticle, rate)
         return
     end
 
-    if absolute_rate >= 1.0 then
-        -- Undo the persistent visibility change used by the sub-1% layout,
-        -- then leave all numeric formatting to vanilla.
+    if absolute_rate < 1.0 then
+        -- Undo the persistent visibility change used by the three-decimal
+        -- layout, then leave sub-1% formatting to vanilla.
         local vanilla_percent = widgets["BP_PalTextBlock_C_2"]
         if is_valid(vanilla_percent) then
             pcall(function()

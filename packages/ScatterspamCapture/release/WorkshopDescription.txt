@@ -2,8 +2,7 @@
 
 [b]Load your Scatter Sphere Launcher—because it was never really 0%.[/b]
 
-Tired of tiny capture chances getting rounded away? This mod shows rates below
-1% with three decimals, so 0.006% stays 0.006%.
+This mod shows aiming capture rates at or above 1% with three decimal places.
 
 It also hides the message that floods your screen during sphere spam:
 
