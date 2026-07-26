@@ -2,7 +2,7 @@
 
 [b]Load your Scatter Sphere Launcher—because it was never really 0%.[/b]
 
-This mod shows aiming capture rates at or above 1% with three decimal places.
+This mod shows aiming capture rates below 1% with three decimal places.
 
 It also hides the message that floods your screen during sphere spam:
 

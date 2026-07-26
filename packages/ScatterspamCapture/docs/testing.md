@@ -322,3 +322,64 @@ a sub-1% target.
 - Corrects the formatting threshold: aiming rates at or above `1%` use three
   truncated decimal places.
 - Leaves rates below `1%` to Palworld's vanilla formatter.
+
+Result: **incorrect requirement.** The three-decimal formatter is only needed
+for displayed rates below `0.01%`.
+
+## Version 1.0.8
+
+- Applies three-decimal formatting only when the displayed aiming rate is below
+  `0.01%`.
+- Leaves rates at or above `0.01%` to Palworld's vanilla formatter.
+
+## Versions 1.0.9–1.0.14
+
+- Makes hook registration work during UE4SS hot reload even when its deferred
+  `EngineTick` dispatcher has stopped.
+- Identifies Palworld 1.0's live aiming formatter as `SetCaptureRateForce`;
+  the former `Set Display Capture Rate Force` function still exists but is no
+  longer called while aiming.
+- Applies the widget update synchronously from the live formatter hook.
+
+Result: verified in game with a raw `0.00637288%` capture rate displayed as
+`0.006%`.
+
+## Version 1.0.15
+
+- Clears and collapses the injected third-decimal widget when the aiming rate
+  returns to `0.01%` or higher.
+- Restores the separate vanilla percent widget so the previous low-rate digit
+  cannot remain stuck on later targets.
+
+Result: the third digit cleared correctly, but Palworld's subsequent
+`Update Display Rate` collapsed the separate percent widget.
+
+## Version 1.0.16
+
+- Uses the persistent suffix slot as `%` at or above `0.01%`.
+- Uses the same slot as `<third digit>%` below `0.01%`, avoiding a transition
+  race with Palworld's separate percent widget.
+
+Result: the percent symbol returned, but the mod still replaced vanilla's
+percent-widget behavior unnecessarily.
+
+## Version 1.0.17
+
+- Leaves all vanilla numeric and percent widgets untouched during normal use.
+- Injects only the third digit below `0.01%` and clears only that injected slot
+  at or above the threshold.
+- Repairs percent widgets collapsed by versions 1.0.15–1.0.16 once per active
+  reticle during hot-reload migration.
+
+Result: the migration targeted an obsolete separate percent widget; Palworld
+1.0 owns the visible percent suffix in `C_6`.
+
+## Version 1.0.18
+
+- Relies on the Blueprint post-hook phase: `SetCaptureRateForce` restores the
+  entire vanilla layout before the mod callback.
+- Treats `SetCaptureRateForce` values as raw probabilities: `0.01` is the
+  threshold for a displayed `1%` rate.
+- Returns without any widget writes at or above displayed `1%`.
+- Replaces only the vanilla `%` suffix with `<third digit>%` below displayed
+  `1%`.
