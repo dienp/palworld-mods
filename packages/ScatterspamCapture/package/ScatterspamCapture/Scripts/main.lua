@@ -4,15 +4,28 @@ local ASSET_PATH =
     "WBP_PalGetReticle"
 local HOOK_PATH =
     "/Game/Pal/Blueprint/UI/UserInterface/InGame/GetReticle/" ..
-    "WBP_PalGetReticle.WBP_PalGetReticle_C:Set Display Capture Rate Force"
+    "WBP_PalGetReticle.WBP_PalGetReticle_C:SetCaptureRateForce"
 local TEXT_BLOCK_CLASS_PATH =
     "/Game/Pal/Blueprint/UI/PalTextBlock/" ..
     "BP_PalTextBlock.BP_PalTextBlock_C"
 local ADD_LOG_HOOK_PATH = "/Script/Pal.PalLogManager:AddLog"
 local SPHERE_WARNING_PREFIX = "this sphere isn't working on"
+local debug_enabled = false
+local debug_notifications = false
+local debug_console = false
+local formatter_debug_count = 0
+local FORMATTER_DEBUG_LIMIT = 20
 
 local function log(message)
     print(string.format("[%s] %s\n", MOD_NAME, message))
+end
+
+local function debug_log(message)
+    if debug_enabled and debug_console and
+        formatter_debug_count < FORMATTER_DEBUG_LIMIT then
+        formatter_debug_count = formatter_debug_count + 1
+        log("DEBUG formatter: " .. message)
+    end
 end
 
 local function unwrap(value)
@@ -131,6 +144,12 @@ end
 
 local function set_third_decimal(reticle, rate)
     if not is_valid(reticle) or type(rate) ~= "number" then
+        debug_log(string.format(
+            "invalid input; reticle_valid=%s rate=%s rate_type=%s",
+            tostring(is_valid(reticle)),
+            tostring(rate),
+            type(rate)
+        ))
         return
     end
 
@@ -139,19 +158,31 @@ local function set_third_decimal(reticle, rate)
     local widgets = reticle_key ~= nil and
         widgets_by_reticle[reticle_key] or nil
     if widgets == nil then
+        debug_log(string.format(
+            "no widget map; rate=%.9f reticle_key=%s",
+            absolute_rate,
+            tostring(reticle_key)
+        ))
         return
     end
 
-    if absolute_rate < 1.0 then
-        -- Undo the persistent visibility change used by the three-decimal
-        -- layout, then leave sub-1% formatting to vanilla.
-        local vanilla_percent = widgets["BP_PalTextBlock_C_2"]
-        if is_valid(vanilla_percent) then
-            pcall(function()
-                vanilla_percent:SetText(FText("%"))
-                vanilla_percent:SetVisibility(0)
-            end)
+    local widget_names = {}
+    for name, widget in pairs(widgets) do
+        if is_valid(widget) then
+            table.insert(widget_names, name)
         end
+    end
+    table.sort(widget_names)
+    debug_log(string.format(
+        "called; rate=%.9f reticle_key=%s widgets=%s",
+        absolute_rate,
+        tostring(reticle_key),
+        table.concat(widget_names, ",")
+    ))
+
+    if absolute_rate >= 0.01 then
+        -- The Blueprint hook runs after SetCaptureRateForce, which has already
+        -- restored every vanilla field, including its percent suffix.
         return
     end
 
@@ -180,13 +211,6 @@ local function set_third_decimal(reticle, rate)
         end
     end
 
-    local separate_percent = widgets["BP_PalTextBlock_C_2"]
-    if is_valid(separate_percent) then
-        pcall(function()
-            separate_percent:SetText(FText(""))
-            separate_percent:SetVisibility(1)
-        end)
-    end
 end
 
 local aiming_hook_registered = false
@@ -195,9 +219,7 @@ local sphere_warning_hook_registered = false
 local function on_capture_rate_formatted(self, rate)
     local reticle = unwrap(self)
     local numeric_rate = unwrap(rate)
-    ExecuteInGameThread(function()
-        set_third_decimal(reticle, numeric_rate)
-    end)
+    set_third_decimal(reticle, numeric_rate)
 end
 
 local function text_to_string(parameter)
@@ -310,7 +332,7 @@ local function load_asset_and_register_hook()
         )
         if ok then
             aiming_hook_registered = true
-            log("Aiming capture-rate hook registered")
+            log("SetCaptureRateForce formatter hook registered")
         end
     end
 
@@ -327,7 +349,15 @@ local function load_asset_and_register_hook()
     end
 end
 
--- Try immediately for hot reloads in an active world.
+-- A hot reload happens in an already initialized world. Register synchronously
+-- first because UE4SS's deferred EngineTick dispatcher may have been removed
+-- while unloading the previous Lua instance.
+local immediate_ok, immediate_error = pcall(load_asset_and_register_hook)
+if not immediate_ok then
+    log("Immediate initialization failed: " .. tostring(immediate_error))
+end
+
+-- Retain a game-thread attempt for cold startup and unusual load sequences.
 ExecuteInGameThread(load_asset_and_register_hook)
 
 -- Try again after future world initialization.
