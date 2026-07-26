@@ -3,7 +3,7 @@
 ## Build
 
 - Game revision: 82182 or newer
-- Build version: `1.0.1`
+- Build version: `1.0.2`
 - Mod type: Lua
 - Deployment: server only; clients must not install the mod
 

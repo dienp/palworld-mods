@@ -20,7 +20,7 @@ The modifier applies to 100% of eligible salvage attempts. Each attempt costs
 two magnets in total (one vanilla plus one Deep Salvage cost) and receives +100% of the
 estimated base reward quantity while preserving any active Jellroy bonus.
 
-Production build `1.0.1` uses the 100% modifier chance with runtime
+Production build `1.0.2` uses the 100% modifier chance with runtime
 diagnostics disabled.
 
 ## Safety

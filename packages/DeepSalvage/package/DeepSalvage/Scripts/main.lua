@@ -1,5 +1,5 @@
 local MOD_NAME = "DeepSalvage"
-local MOD_VERSION = "1.0.1"
+local MOD_VERSION = "1.0.2"
 
 local CONFIG = {
     modifier_chance = 1.0,
@@ -941,7 +941,26 @@ local function restore_server_difficulty(attempt)
     })
 end
 
+local function cleanup_expired_attempts()
+    local now = now_ms()
+    for model_key, attempt in pairs(attempts_by_model) do
+        if attempt.expires < now then
+            log("WARN", "salvage_attempt_expired", {
+                model = model_key,
+                player_id = attempt.player_id or "unknown",
+                reward_selected = attempt.reward_selected,
+                reward_applied = attempt.reward_applied,
+            })
+            if attempt.reward_applied then
+                restore_container_reward(attempt)
+            end
+            attempts_by_model[model_key] = nil
+        end
+    end
+end
+
 local function on_request_open(model, request_player_id)
+    cleanup_expired_attempts()
     model = unwrap(model)
     if CONFIG.debug_enabled and not callback_seen.request_open then
         callback_seen.request_open = true
@@ -1312,6 +1331,7 @@ local function on_obtain_info(model, ...)
 end
 
 local function on_salvage_result(model, result)
+    cleanup_expired_attempts()
     if not callback_seen.salvage_result then
         callback_seen.salvage_result = true
         log("INFO", "salvage_result_seen", {
@@ -1380,24 +1400,6 @@ local function register_hook(name, path, callback, post)
     return ok
 end
 
-local function cleanup_expired_attempts()
-    local now = now_ms()
-    for model_key, attempt in pairs(attempts_by_model) do
-        if attempt.expires < now then
-            log("WARN", "salvage_attempt_expired", {
-                model = model_key,
-                player_id = attempt.player_id or "unknown",
-                reward_selected = attempt.reward_selected,
-                reward_applied = attempt.reward_applied,
-            })
-            if attempt.reward_applied then
-                restore_container_reward(attempt)
-            end
-            attempts_by_model[model_key] = nil
-        end
-    end
-end
-
 register_hook("request_open", PATHS.request_open, on_request_open, false)
 register_hook(
     "request_open_post",
@@ -1436,15 +1438,6 @@ end
 capture_magnet_slots({
     TreasureGradeType = 1,
 })
-
-LoopAsync(1000, function()
-    ExecuteInGameThread(function()
-        if next(attempts_by_model) ~= nil then
-            cleanup_expired_attempts()
-        end
-    end)
-    return false
-end)
 
 log("INFO", "mod_loaded", {
     version = MOD_VERSION,
