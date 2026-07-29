@@ -99,58 +99,29 @@ else if (mode == "patch-actor")
 {
     var paths = ReplaceStrings(
         json,
-        "/Game/Pal/Effect/Common/Glow/NS_SingleStar",
-        "/Game/Pal/Effect/Common/Glow/NS_ItemPickupTower_Glow");
-    var names = ReplaceStrings(json, "NS_SingleStar", "NS_ItemPickupTower_Glow");
+        "/Game/Pal/Effect/Common/Glow/NS_ItemPickupTower_Glow",
+        "/Game/Pal/Effect/Common/Dungeon_Gate/NS_Dungeon_Gate_In_WorldTree");
+    var names = ReplaceStrings(
+        json,
+        "NS_ItemPickupTower_Glow",
+        "NS_Dungeon_Gate_In_WorldTree");
     if (paths == 0 || names == 0)
     {
         Console.Error.WriteLine(
-            $"Expected the salvage actor's NS_SingleStar reference; paths {paths}, names {names}.");
+            $"Expected the salvage actor's pickup-tower reference; paths {paths}, names {names}.");
         return 7;
-    }
-
-    if (args.Length < 5 || !File.Exists(args[4]))
-    {
-        Console.Error.WriteLine("patch-actor requires the original pickup-tower system as argument 5.");
-        return 10;
-    }
-
-    var effectAsset = new UAsset(
-        Path.GetFullPath(args[4]),
-        EngineVersion.VER_UE5_1,
-        mappings);
-    var effectJson = JsonNode.Parse(effectAsset.SerializeJson())!;
-    var exposedParameters = FindProperty(effectJson, "ExposedParameters") as JsonObject;
-    if (exposedParameters is null)
-    {
-        Console.Error.WriteLine("The pickup-tower system has no exposed-parameter store.");
-        return 11;
-    }
-
-    var overrideTemplate = exposedParameters.DeepClone() as JsonObject
-        ?? throw new InvalidOperationException("Unable to clone exposed parameters.");
-    overrideTemplate["Name"] = "OverrideParameters";
-    SetPickupTowerParameters(overrideTemplate, 0.25f);
-
-    var replacedStores = ReplaceNonEmptyOverrideStores(json, overrideTemplate);
-    if (replacedStores == 0)
-    {
-        Console.Error.WriteLine("No populated Niagara override store was found in the salvage actor.");
-        return 12;
     }
 
     if (json["NameMap"] is JsonArray actorNames)
     {
-        AddName(actorNames, "User.BaseColor");
-        AddName(actorNames, "User.LightColor");
-        AddName(actorNames, "User.Rate");
-        AddName(actorNames, "LinearColor");
-        AddName(actorNames, "NS_ItemPickupTower_Glow");
-        AddName(actorNames, "/Game/Pal/Effect/Common/Glow/NS_ItemPickupTower_Glow");
+        AddName(actorNames, "NS_Dungeon_Gate_In_WorldTree");
+        AddName(
+            actorNames,
+            "/Game/Pal/Effect/Common/Dungeon_Gate/NS_Dungeon_Gate_In_WorldTree");
     }
 
     Console.WriteLine(
-        $"Repointed {paths} system paths and {names} Niagara identifiers; replaced {replacedStores} parameter store(s) at scale 0.25.");
+        $"Repointed {paths} system paths and {names} Niagara identifiers to the Dungeon Gate in World Tree effect.");
 }
 else
 {

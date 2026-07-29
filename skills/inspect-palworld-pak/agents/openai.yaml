@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspect Palworld PAK"
+  short_description: "Safely list, search, and read Palworld PAK files"
+  default_prompt: "Use $inspect-palworld-pak to inventory the installed Palworld archive and extract only the files needed for this modding task."

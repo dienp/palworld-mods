@@ -1,0 +1,16 @@
+﻿{
+    "SchemaVersion":  1,
+    "ModName":  "Salvage Effect Cycler",
+    "PackageName":  "SalvageEffectCycler",
+    "ModType":  "Lua",
+    "GamePath":  "",
+    "RepakPath":  "tools/repak/repak.exe",
+    "StagingPath":  "work/staging",
+    "DistPath":  "dist",
+    "WorkshopItemId":  null,
+    "Diagnostics":  {
+                        "Enabled":  true,
+                        "Notifications":  true,
+                        "Console":  true
+                    }
+}

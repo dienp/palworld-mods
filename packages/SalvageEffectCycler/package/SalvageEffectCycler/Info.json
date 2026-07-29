@@ -1,10 +1,10 @@
 ﻿{
-    "ModName":  "Visible Fishing Salvage Spots",
-    "PackageName":  "VisibleFishingSalvageSpots",
+    "ModName":  "Salvage Effect Cycler",
+    "PackageName":  "SalvageEffectCycler",
     "Thumbnail":  "thumbnail.png",
-    "Version":  "1.1.0",
-    "DebugMode":  false,
-    "MinRevision":  619,
+    "Version":  "0.1.0-dev.7",
+    "DebugMode":  true,
+    "MinRevision":  82182,
     "Author":  "ptd",
     "Dependencies":  [
 
@@ -14,9 +14,9 @@
              ],
     "InstallRule":  [
                         {
-                            "Type":  "Paks",
+                            "Type":  "Lua",
                             "Targets":  [
-                                            "./Paks/"
+                                            "."
                                         ]
                         }
                     ]

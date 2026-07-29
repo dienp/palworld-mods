@@ -15,8 +15,8 @@ easier to notice from a distance and against visually busy water.
 
 The Workshop-ready production build is:
 
-`dist/VisibleFishingSalvageSpots_1.0.0_P.pak`
+`package/VisibleFishingSalvageSpots/Paks/VisibleFishingSalvageSpots_1.1.0_P.pak`
 
 It gives normal and Rank 2 salvage spots Palworld's original, unmodified
-`NS_ItemPickupTower_Glow` marker at scale `0.25`, plus stronger emissive
-salvage materials. The mod packages no cloned or modified Niagara system.
+`NS_Dungeon_Gate_In_WorldTree` marker, plus stronger emissive salvage
+materials. The mod packages no cloned or modified Niagara system.

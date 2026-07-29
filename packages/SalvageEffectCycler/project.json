@@ -1,0 +1,15 @@
+{
+  "name": "salvage-effect-cycler",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "root": "packages/SalvageEffectCycler",
+  "targets": {
+    "validate": {
+      "command": "node ../../scripts/validate-mods.mjs .",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    }
+  },
+  "tags": ["type:mod", "format:lua", "runtime:client", "purpose:development"]
+}

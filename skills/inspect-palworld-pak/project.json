@@ -1,0 +1,15 @@
+{
+  "name": "inspect-palworld-pak",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "root": "skills/inspect-palworld-pak",
+  "targets": {
+    "validate": {
+      "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/validate.ps1",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    }
+  },
+  "tags": ["type:skill", "domain:palworld"]
+}

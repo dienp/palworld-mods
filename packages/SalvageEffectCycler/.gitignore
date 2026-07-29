@@ -1,0 +1,6 @@
+﻿tools/
+work/original/
+work/staging/
+dist/*
+!dist/.gitkeep
+*.pak.disabled

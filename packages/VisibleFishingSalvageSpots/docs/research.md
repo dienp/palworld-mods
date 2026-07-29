@@ -32,18 +32,18 @@ does not replace the mesh or textures.
 
 ## Final marker implementation
 
-Release `1.0.0` uses Palworld's built-in pickup marker:
+Release `1.1.0` uses Palworld's built-in Dungeon Gate in World Tree marker,
+selected after in-game comparison:
 
 - Source Niagara system:
-  `Pal/Content/Pal/Effect/Common/Glow/NS_ItemPickupTower_Glow`
-- Marker scale:
-  `0.25`
+  `Pal/Content/Pal/Effect/Common/Dungeon_Gate/NS_Dungeon_Gate_In_WorldTree`
 - No Niagara or ray-material asset is packaged by the mod.
 
 The normal and Rank 2 salvage treasure actors already contain a Niagara
 component. Their original `NS_SingleStar` references are repointed to the
-original pickup-marker system, avoiding additional Blueprint runtime logic and
-unsafe cooked-Niagara cloning. The system retains its original color.
+original dungeon-gate system, avoiding additional Blueprint runtime logic,
+unsafe cooked-Niagara cloning, and unstable UE4SS runtime asset swaps. The
+system retains its original appearance.
 
 ## Dependencies
 
