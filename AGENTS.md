@@ -17,6 +17,11 @@ This repository contains Palworld mods orchestrated by Nx.
 
 ## Required checks
 
+- Before implementing a mod, verify the requested behavior against the current
+  vanilla game in the exact relevant screen or gameplay context. Inspect
+  existing UI states, alternate views, settings, and reflected assets, and
+  record evidence that vanilla does not already provide the behavior. Finding
+  a callable API or viable hook is not sufficient proof that a mod is needed.
 - Run `npm run validate` after changing package metadata or payloads.
 - Run `npm run build` after changing a .NET asset tool.
 - Increment the mod version for every distributed test build.

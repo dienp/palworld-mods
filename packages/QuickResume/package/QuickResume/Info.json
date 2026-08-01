@@ -1,0 +1,23 @@
+﻿{
+    "ModName":  "Quick Resume",
+    "PackageName":  "QuickResume",
+    "Thumbnail":  "thumbnail.png",
+    "Version":  "0.1.0-dev.2",
+    "DebugMode":  true,
+    "MinRevision":  82182,
+    "Author":  "ptd",
+    "Dependencies":  [
+                         "UE4SSExperimentalPW"
+                     ],
+    "Tags":  [
+                 "Utilities"
+             ],
+    "InstallRule":  [
+                        {
+                            "Type":  "Lua",
+                            "Targets":  [
+                                            "."
+                                        ]
+                        }
+                    ]
+}
