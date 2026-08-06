@@ -630,10 +630,15 @@ public sealed partial class LiveBridgeClient
 
     private void EnsurePalComBootstrap()
     {
-        var executable = config.PalComMcpServerExecutable;
-        if (string.IsNullOrWhiteSpace(executable))
+        var executable = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(executable) ||
+            !string.Equals(
+                Path.GetFileNameWithoutExtension(executable),
+                "palworld-mcp-server",
+                StringComparison.OrdinalIgnoreCase
+            ))
         {
-            executable = Environment.ProcessPath;
+            executable = config.PalComMcpServerExecutable;
         }
         var enabled = config.PalComChatEnabled &&
             !string.IsNullOrWhiteSpace(executable) &&
@@ -641,12 +646,12 @@ public sealed partial class LiveBridgeClient
         if (enabled)
         {
             var configPath = PalworldConfig.ResolveConfigPath();
-            File.WriteAllText(
+            WriteProvisionedFile(
                 palComLauncherPath,
                 BuildPalComLauncher(executable!, configPath)
             );
         }
-        File.WriteAllText(
+        WriteProvisionedFile(
             palComBootstrapPath,
             LiveBridgeProtocol.Encode(new Dictionary<string, string?>
             {
@@ -655,6 +660,20 @@ public sealed partial class LiveBridgeClient
                 ["prefix"] = config.PalComChatPrefix
             })
         );
+    }
+
+    private static void WriteProvisionedFile(string path, string contents)
+    {
+        var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temporaryPath, contents);
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(temporaryPath);
+        }
     }
 
     internal static string BuildPalComLauncher(
