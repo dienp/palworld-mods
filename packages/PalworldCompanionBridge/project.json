@@ -1,0 +1,15 @@
+{
+  "name": "palworld-companion-bridge",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "root": "packages/PalworldCompanionBridge",
+  "targets": {
+    "validate": {
+      "command": "node ../../scripts/validate-mods.mjs .",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    }
+  },
+  "tags": ["type:mod", "format:lua", "runtime:client", "protocol:mcp-bridge"]
+}

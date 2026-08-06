@@ -1,0 +1,55 @@
+{
+  "name": "palworld-mcp-server",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "root": "packages/PalworldMcpServer",
+  "targets": {
+    "bootstrap": {
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-palcalc.ps1",
+      "options": {
+        "cwd": "{projectRoot}"
+      },
+      "cache": false
+    },
+    "build": {
+      "command": "dotnet build src/PalworldMcpServer/PalworldMcpServer.csproj --configuration Release",
+      "options": {
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": ["bootstrap"],
+      "outputs": ["{projectRoot}/src/PalworldMcpServer/bin"]
+    },
+    "package": {
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1",
+      "options": {
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": ["bootstrap"],
+      "cache": false,
+      "outputs": ["{projectRoot}/dist"]
+    },
+    "smoke-release": {
+      "command": "node scripts/smoke-test-release.mjs dist/palworld-mcp-server-v0.9.5-win-x64/palworld-mcp-server.exe",
+      "options": {
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": ["package"],
+      "cache": false
+    },
+    "test": {
+      "command": "dotnet test tests/PalworldMcpServer.Tests/PalworldMcpServer.Tests.csproj --configuration Release",
+      "options": {
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": ["bootstrap"]
+    },
+    "validate": {
+      "command": "dotnet test tests/PalworldMcpServer.Tests/PalworldMcpServer.Tests.csproj --configuration Release",
+      "options": {
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": ["bootstrap"]
+    }
+  },
+  "tags": ["type:tool", "runtime:local", "protocol:mcp"]
+}

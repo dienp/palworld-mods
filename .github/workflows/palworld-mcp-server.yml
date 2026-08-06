@@ -1,0 +1,124 @@
+name: Palworld MCP Server
+
+on:
+  pull_request:
+    paths:
+      - "packages/PalworldMcpServer/**"
+      - "packages/PalworldCompanionBridge/**"
+      - ".github/workflows/palworld-mcp-server.yml"
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - "packages/PalworldMcpServer/**"
+      - "packages/PalworldCompanionBridge/**"
+      - ".github/workflows/palworld-mcp-server.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to package
+        required: true
+        default: "0.9.5"
+      publish_release:
+        description: Publish a GitHub release after building
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+
+      - name: Select version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content `
+            "packages/PalworldMcpServer/src/PalworldMcpServer/PalworldMcpServer.csproj"
+          $projectVersion = @(
+            $project.Project.PropertyGroup.Version |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          )[0]
+          $version = if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "${{ inputs.version }}"
+          } else {
+            $projectVersion
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Unable to determine the MCP package version."
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Bootstrap PalCalc
+        shell: pwsh
+        working-directory: packages/PalworldMcpServer
+        run: ./scripts/bootstrap-palcalc.ps1
+
+      - name: Test
+        shell: pwsh
+        working-directory: packages/PalworldMcpServer
+        run: dotnet test tests/PalworldMcpServer.Tests/PalworldMcpServer.Tests.csproj --configuration Release
+
+      - name: Validate companion bridge
+        shell: pwsh
+        run: node scripts/validate-mods.mjs packages/PalworldCompanionBridge
+
+      - name: Package
+        shell: pwsh
+        working-directory: packages/PalworldMcpServer
+        run: ./scripts/package-release.ps1 -Version "${{ steps.version.outputs.value }}"
+
+      - name: Smoke-test packaged executable
+        shell: pwsh
+        working-directory: packages/PalworldMcpServer
+        run: >
+          node scripts/smoke-test-release.mjs
+          "dist/palworld-mcp-server-v${{ steps.version.outputs.value }}-win-x64/palworld-mcp-server.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: palworld-mcp-server-v${{ steps.version.outputs.value }}-win-x64
+          path: |
+            packages/PalworldMcpServer/dist/*.zip
+            packages/PalworldMcpServer/dist/SHA256SUMS.txt
+            packages/PalworldMcpServer/dist/artifact-manifest.json
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: palworld-mcp-server-v${{ needs.build.outputs.version }}-win-x64
+          path: release
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: palworld-mcp-v${{ needs.build.outputs.version }}
+        run: >
+          gh release create "$TAG"
+          release/*
+          --repo "${{ github.repository }}"
+          --title "Palworld MCP Server v${{ needs.build.outputs.version }}"
+          --generate-notes
