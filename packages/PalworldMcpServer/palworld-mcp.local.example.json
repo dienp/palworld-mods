@@ -1,0 +1,13 @@
+{
+  "savePath": "C:\\Path\\To\\Pal\\Saved\\SaveGames\\SteamId\\WorldId",
+  "allowedPlayerIds": [],
+  "defaultPageSize": 50,
+  "maximumPageSize": 200,
+  "persistentPlanCacheEnabled": true,
+  "persistentPlanCachePath": null,
+  "persistentPlanCacheCapacity": 256,
+  "liveBridgeEnabled": false,
+  "liveBridgeWriteEnabled": true,
+  "liveBridgeDirectory": null,
+  "liveBridgeTimeoutMilliseconds": 5000
+}

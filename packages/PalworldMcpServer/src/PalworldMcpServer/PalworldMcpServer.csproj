@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows10.0.17763.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Version>0.9.5</Version>
+    <AssemblyName>palworld-mcp-server</AssemblyName>
+    <RootNamespace>PalworldMcpServer</RootNamespace>
+    <PalCalcPath Condition="'$(PalCalcPath)' == ''">$(MSBuildThisFileDirectory)..\..\..\..\tools\palcalc</PalCalcPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PalworldMcpServer.Tests" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.9" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.9" />
+    <PackageReference Include="ModelContextProtocol" Version="1.4.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Serilog" Version="3.1.1" />
+    <PackageReference Include="SharpZipLib" Version="1.4.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="PalCalc.Model" HintPath="$(PalCalcPath)\PalCalc.Model.dll" Private="true" />
+    <Reference Include="PalCalc.SaveReader" HintPath="$(PalCalcPath)\PalCalc.SaveReader.dll" Private="true" />
+    <Reference Include="PalCalc.Solver" HintPath="$(PalCalcPath)\PalCalc.Solver.dll" Private="true" />
+    <None Include="$(PalCalcPath)\libooz.dll" Link="libooz.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

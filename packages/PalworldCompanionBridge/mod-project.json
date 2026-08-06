@@ -1,0 +1,16 @@
+﻿{
+    "SchemaVersion":  1,
+    "ModName":  "Palworld Companion Bridge",
+    "PackageName":  "PalworldCompanionBridge",
+    "ModType":  "Lua",
+    "GamePath":  "",
+    "RepakPath":  "",
+    "StagingPath":  "work/staging",
+    "DistPath":  "dist",
+    "WorkshopItemId":  null,
+    "Diagnostics":  {
+                        "Enabled":  true,
+                        "Notifications":  true,
+                        "Console":  true
+                    }
+}

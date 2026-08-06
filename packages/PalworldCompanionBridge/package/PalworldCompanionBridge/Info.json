@@ -1,0 +1,23 @@
+﻿{
+    "ModName":  "Palworld Companion Bridge",
+    "PackageName":  "PalworldCompanionBridge",
+    "Thumbnail":  "thumbnail.png",
+    "Version":  "0.1.0-dev.110",
+    "DebugMode":  true,
+    "MinRevision":  0,
+    "Author":  "ptd",
+    "Dependencies":  [
+
+                     ],
+    "Tags":  [
+
+             ],
+    "InstallRule":  [
+                        {
+                            "Type":  "Lua",
+                            "Targets":  [
+                                            "."
+                                        ]
+                        }
+                    ]
+}
