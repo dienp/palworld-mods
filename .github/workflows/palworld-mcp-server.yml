@@ -48,8 +48,11 @@ jobs:
     runs-on: windows-2025
     outputs:
       version: ${{ steps.version.outputs.value }}
+      release_required: ${{ steps.release_changes.outputs.value }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -58,6 +61,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22.x"
+
+      - name: Detect releasable runtime changes
+        id: release_changes
+        shell: pwsh
+        run: |
+          $releaseRequired = $false
+          if ("${{ github.event_name }}" -eq "push") {
+            $changedFiles = git diff --name-only `
+              "${{ github.event.before }}" "${{ github.sha }}"
+            $releaseRequired = @(
+              $changedFiles | Where-Object {
+                $_ -match '^packages/PalworldMcpServer/src/' -or
+                $_ -match '^packages/PalworldCompanionBridge/package/'
+              }
+            ).Count -gt 0
+          }
+          "value=$($releaseRequired.ToString().ToLowerInvariant())" >>
+            $env:GITHUB_OUTPUT
 
       - name: Select version
         id: version
@@ -116,7 +137,9 @@ jobs:
 
   release:
     if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/main' &&
+       needs.build.outputs.release_required == 'true') ||
       (github.event_name == 'workflow_dispatch' && inputs.publish_release)
     needs: build
     runs-on: ubuntu-latest

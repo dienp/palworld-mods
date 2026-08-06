@@ -322,9 +322,12 @@ The resulting hash must match the entry published in `SHA256SUMS.txt`.
 The `Palworld MCP Server` GitHub Actions workflow builds, tests, smoke-tests,
 and uploads a Windows artifact only when MCP server source, tests, packaging,
 packaged bridge payload, or release metadata changes. Pull requests and
-`codex/**` branches produce CI artifacts without publishing. A related push to
-`main` automatically publishes the versioned GitHub release. The manual
-trigger can also publish when `publish_release` is explicitly enabled.
+`codex/**` branches produce CI artifacts without publishing. A push to `main`
+automatically publishes the versioned GitHub release only when runtime code
+under `PalworldMcpServer/src` or the bundled bridge `package` changes.
+Documentation, tests, workflow, and packaging-only changes do not publish a
+release. The manual trigger can still publish when `publish_release` is
+explicitly enabled.
 
 Before any public release, resolve the `libooz.dll` redistribution note in
 `THIRD-PARTY-NOTICES.md`.
