@@ -23,6 +23,8 @@ public sealed partial class LiveBridgeClient
     private readonly string heartbeatPath;
     private readonly string completedDirectory;
     private readonly string auditPath;
+    private readonly string palComBootstrapPath;
+    private readonly string palComLauncherPath;
 
     public LiveBridgeClient() : this(PalworldConfig.Load())
     {
@@ -37,12 +39,15 @@ public sealed partial class LiveBridgeClient
         heartbeatPath = Path.Combine(bridgeDirectory, "status.pcb");
         completedDirectory = Path.Combine(bridgeDirectory, "completed");
         auditPath = Path.Combine(bridgeDirectory, "mcp-audit.jsonl");
+        palComBootstrapPath = Path.Combine(bridgeDirectory, "palcom-bootstrap.pcb");
+        palComLauncherPath = Path.Combine(bridgeDirectory, "palcom-launch.cmd");
 
         if (config.LiveBridgeEnabled)
         {
             Directory.CreateDirectory(bridgeDirectory);
             Directory.CreateDirectory(completedDirectory);
             EnsureSettingsExample();
+            EnsurePalComBootstrap();
         }
     }
 
@@ -618,8 +623,55 @@ public sealed partial class LiveBridgeClient
         File.WriteAllText(path, LiveBridgeProtocol.Encode(new Dictionary<string, string?>
         {
             ["enabled"] = "true",
+            ["palcom_lazy_start_enabled"] = "true",
             ["write_actions_enabled"] = "true"
         }));
+    }
+
+    private void EnsurePalComBootstrap()
+    {
+        var executable = config.PalComMcpServerExecutable;
+        if (string.IsNullOrWhiteSpace(executable))
+        {
+            executable = Environment.ProcessPath;
+        }
+        var enabled = config.PalComChatEnabled &&
+            !string.IsNullOrWhiteSpace(executable) &&
+            File.Exists(executable);
+        if (enabled)
+        {
+            var configPath = PalworldConfig.ResolveConfigPath();
+            File.WriteAllText(
+                palComLauncherPath,
+                BuildPalComLauncher(executable!, configPath)
+            );
+        }
+        File.WriteAllText(
+            palComBootstrapPath,
+            LiveBridgeProtocol.Encode(new Dictionary<string, string?>
+            {
+                ["enabled"] = enabled ? "true" : "false",
+                ["launcher"] = enabled ? palComLauncherPath : "",
+                ["prefix"] = config.PalComChatPrefix
+            })
+        );
+    }
+
+    internal static string BuildPalComLauncher(
+        string executable,
+        string configPath
+    )
+    {
+        static string BatchValue(string value) => value.Replace("%", "%%");
+        return string.Join(
+            "\r\n",
+            "@echo off",
+            "setlocal DisableDelayedExpansion",
+            $"set \"PALWORLD_MCP_CONFIG={BatchValue(configPath)}\"",
+            $"start \"\" /b \"{BatchValue(executable)}\" --palcom-agent",
+            "exit /b %errorlevel%",
+            ""
+        );
     }
 
     internal static string ResolveBridgeDirectory(string? configuredPath)

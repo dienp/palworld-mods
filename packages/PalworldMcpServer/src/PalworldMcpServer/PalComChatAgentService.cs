@@ -51,6 +51,7 @@ public sealed class PalComChatAgentService(
         var requestPath = Path.Combine(directory, "palcom-request.pcb");
         var responsePath = Path.Combine(directory, "palcom-response.pcb");
         var statusPath = Path.Combine(directory, "palcom-status.pcb");
+        var lockPath = Path.Combine(directory, "palcom-agent.lock");
 
         logger.LogInformation(
             "PalCom chat agent {State}; mailbox {Directory}",
@@ -64,6 +65,26 @@ public sealed class PalComChatAgentService(
             await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
             return;
         }
+
+        FileStream instanceLock;
+        try
+        {
+            instanceLock = new FileStream(
+                lockPath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None
+            );
+        }
+        catch (IOException)
+        {
+            logger.LogInformation(
+                "Another PalCom chat agent already owns {LockPath}",
+                lockPath
+            );
+            return;
+        }
+        await using var heldInstanceLock = instanceLock;
 
         var signals = Channel.CreateBounded<bool>(
             new BoundedChannelOptions(1)

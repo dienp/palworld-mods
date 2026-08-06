@@ -31,10 +31,7 @@ public sealed record PalworldConfig
 
     public static PalworldConfig Load()
     {
-        var explicitPath = Environment.GetEnvironmentVariable("PALWORLD_MCP_CONFIG");
-        var configPath = string.IsNullOrWhiteSpace(explicitPath)
-            ? Path.Combine(AppContext.BaseDirectory, "palworld-mcp.local.json")
-            : Path.GetFullPath(explicitPath);
+        var configPath = ResolveConfigPath();
 
         if (!File.Exists(configPath))
         {
@@ -46,5 +43,13 @@ public sealed record PalworldConfig
             json,
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
         ) ?? new PalworldConfig();
+    }
+
+    internal static string ResolveConfigPath()
+    {
+        var explicitPath = Environment.GetEnvironmentVariable("PALWORLD_MCP_CONFIG");
+        return string.IsNullOrWhiteSpace(explicitPath)
+            ? Path.Combine(AppContext.BaseDirectory, "palworld-mcp.local.json")
+            : Path.GetFullPath(explicitPath);
     }
 }

@@ -29,7 +29,7 @@
       "outputs": ["{projectRoot}/dist"]
     },
     "smoke-release": {
-      "command": "node scripts/smoke-test-release.mjs dist/palworld-mcp-server-v0.9.5-win-x64/palworld-mcp-server.exe",
+      "command": "node scripts/smoke-test-release.mjs dist/palworld-mcp-server-v0.9.6-win-x64/palworld-mcp-server.exe",
       "options": {
         "cwd": "{projectRoot}"
       },

@@ -162,7 +162,10 @@ the answer through private local notifications. The agent runs out of process,
 so Codex never blocks Palworld's game thread.
 
 This feature is opt-in. Add the following fields to
-`palworld-mcp.local.json`, then launch the dedicated background mode with
+`palworld-mcp.local.json`. The normal MCP server provisions a fixed launcher
+under `%LOCALAPPDATA%\PalworldCompanionBridge`; the Lua bridge uses it to start
+the dedicated broker on the first matching chat command when needed. You can
+also launch the broker manually with
 `palworld-mcp-server.exe --palcom-agent`:
 
 ```json
@@ -193,10 +196,13 @@ continuity, but does not persist the transcript.
 
 The broker blocks on a coalescing `FileSystemWatcher` channel instead of polling
 for requests. It renews a 15-second readiness lease every five seconds; this is
-its only recurring PalCom timer. The Lua hook only consumes a prefixed message
-while that lease is fresh. If the broker is disabled or offline, the message
-follows the game's normal chat path. While an answer is pending, Lua checks the
-response through the existing bridge scheduler with adaptive 500 ms,
+its only recurring PalCom timer. If the lease is stale, the Lua hook privately
+suppresses the prefixed command, attempts one lazy broker start, and queues the
+request. A missing launcher produces an immediate private warning; failure to
+renew the lease within 15 seconds produces a second private warning and removes
+the unclaimed request. A broker lock prevents duplicate agent instances. Set
+`palcom_lazy_start_enabled=false` in `bridge-settings.pcb` to opt out. While an
+answer is pending, Lua checks the response through the existing bridge scheduler with adaptive 500 ms,
 one-second, and two-second deadlines. A direct prefixed action request is
 treated as player authorization and executes without a separate
 companion-control confirmation.
@@ -258,7 +264,7 @@ The `package` target creates:
 packages/PalworldMcpServer/dist/
   artifact-manifest.json
   SHA256SUMS.txt
-  palworld-mcp-server-v0.9.5-win-x64.zip
+  palworld-mcp-server-v0.9.6-win-x64.zip
 ```
 
 The ZIP contains a self-contained `palworld-mcp-server.exe`, the example
@@ -301,7 +307,7 @@ For the self-contained release, configure the MCP host to run the EXE directly:
 
 ```toml
 [mcp_servers.palworld]
-command = "C:\\Tools\\palworld-mcp-server-v0.9.5-win-x64\\palworld-mcp-server.exe"
+command = "C:\\Tools\\palworld-mcp-server-v0.9.6-win-x64\\palworld-mcp-server.exe"
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 ```
@@ -312,7 +318,7 @@ required.
 After downloading a release, compare its checksum before extracting:
 
 ```powershell
-Get-FileHash .\palworld-mcp-server-v0.9.5-win-x64.zip -Algorithm SHA256
+Get-FileHash .\palworld-mcp-server-v0.9.6-win-x64.zip -Algorithm SHA256
 ```
 
 The resulting hash must match the entry published in `SHA256SUMS.txt`.

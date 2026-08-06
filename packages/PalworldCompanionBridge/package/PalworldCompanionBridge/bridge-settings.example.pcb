@@ -1,3 +1,4 @@
 PALWORLD_COMPANION_BRIDGE/1
 enabled=true
+palcom_lazy_start_enabled=true
 write_actions_enabled=true

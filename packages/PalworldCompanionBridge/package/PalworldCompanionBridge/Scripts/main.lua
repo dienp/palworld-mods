@@ -1,5 +1,5 @@
 local MOD_NAME = "PalworldCompanionBridge"
-local MOD_VERSION = "0.1.0-dev.110"
+local MOD_VERSION = "0.1.0-dev.111"
 local PROTOCOL_HEADER = "PALWORLD_COMPANION_BRIDGE/1"
 
 local CONFIG = {
@@ -17,6 +17,8 @@ local CONFIG = {
     palcom_response_slow_interval_ms = 2000,
     palcom_response_working_after_ms = 3000,
     palcom_response_slow_after_ms = 30000,
+    palcom_broker_start_timeout_ms = 15000,
+    palcom_broker_start_retry_ms = 15000,
     raid_manager_integrity_interval_ms = 60000,
     raid_queue_rebuild_interval_ms = 60000,
     raid_manager_timeout_ms = 15 * 60 * 1000,
@@ -41,6 +43,7 @@ local paths = bridge_directory and {
     palcom_request = bridge_directory .. "\\palcom-request.pcb",
     palcom_response = bridge_directory .. "\\palcom-response.pcb",
     palcom_status = bridge_directory .. "\\palcom-status.pcb",
+    palcom_bootstrap = bridge_directory .. "\\palcom-bootstrap.pcb",
     palcom_functions = bridge_directory .. "\\palcom-functions.txt",
     audit = bridge_directory .. "\\lua-audit.log",
 } or {}
@@ -51,6 +54,7 @@ local base_name_registry = nil
 local processed_actions = {}
 local palcom_request_counter = 0
 local palcom_pending = nil
+local palcom_last_start_attempt_ms = 0
 local discover_palcom_functions = nil
 local bridge_readiness = {
     controller_available = false,
@@ -302,6 +306,7 @@ end
 local function get_settings()
     local settings = {
         enabled = true,
+        palcom_lazy_start_enabled = true,
         write_actions_enabled = true,
     }
     local payload = read_file(paths.settings)
@@ -313,6 +318,8 @@ local function get_settings()
         return settings
     end
     settings.enabled = decoded.enabled ~= "false"
+    settings.palcom_lazy_start_enabled =
+        decoded.palcom_lazy_start_enabled ~= "false"
     settings.write_actions_enabled =
         decoded.write_actions_enabled ~= "false"
     return settings
@@ -7147,13 +7154,19 @@ local function palcom_trim(value)
     )
 end
 
-local function palcom_status()
+local function palcom_status(require_fresh)
     local payload = read_file(paths.palcom_status)
     if payload == nil then
         return nil
     end
     local status = decode_message(payload)
-    if status == nil or status.ready ~= "true" then
+    if status == nil then
+        return nil
+    end
+    if require_fresh == false then
+        return status
+    end
+    if status.ready ~= "true" then
         return nil
     end
     local lease_until = tonumber(status.lease_until_epoch_ms) or 0
@@ -7165,6 +7178,28 @@ local function palcom_status()
         return nil
     end
     return status
+end
+
+local function palcom_bootstrap()
+    local payload = read_file(paths.palcom_bootstrap)
+    if payload == nil then
+        return nil
+    end
+    local bootstrap = decode_message(payload)
+    if bootstrap == nil or bootstrap.enabled ~= "true" then
+        return nil
+    end
+    return bootstrap
+end
+
+local function palcom_prefix()
+    local status = palcom_status(false)
+    local prefix = status and palcom_trim(status.prefix) or ""
+    if prefix == "" then
+        local bootstrap = palcom_bootstrap()
+        prefix = bootstrap and palcom_trim(bootstrap.prefix) or ""
+    end
+    return prefix ~= "" and prefix or "Hey PalCom,"
 end
 
 local function palcom_private_message(speaker, message, priority)
@@ -7204,7 +7239,41 @@ local function palcom_context()
     return ok and context or {}
 end
 
-local function submit_palcom_request(message)
+local function start_palcom_broker()
+    local settings = get_settings()
+    if not settings.palcom_lazy_start_enabled then
+        return false, "automatic startup is disabled in bridge-settings.pcb"
+    end
+    local bootstrap = palcom_bootstrap()
+    local launcher = bootstrap and palcom_trim(bootstrap.launcher) or ""
+    if launcher == "" then
+        return false, "the PalCom launcher has not been provisioned"
+    end
+    if string.find(launcher, "[\r\n\"]") or
+        string.sub(string.lower(launcher), -4) ~= ".cmd" then
+        return false, "the provisioned PalCom launcher is invalid"
+    end
+
+    local current_ms = now_ms()
+    if current_ms - palcom_last_start_attempt_ms <
+        CONFIG.palcom_broker_start_retry_ms then
+        return true, "a startup attempt is already in progress"
+    end
+    palcom_last_start_attempt_ms = current_ms
+
+    local command = 'start "" /b "' .. launcher .. '"'
+    local ok, result, mode, code = pcall(os.execute, command)
+    local launched = ok and (
+        result == true or result == 0 or
+        (mode == "exit" and tonumber(code) == 0)
+    )
+    if not launched then
+        return false, "the launcher command failed"
+    end
+    return true, "startup requested"
+end
+
+local function submit_palcom_request(message, broker_start_deadline_at_ms)
     if read_file(paths.palcom_request) ~= nil or palcom_pending ~= nil then
         palcom_private_message(
             "PalCom",
@@ -7245,6 +7314,7 @@ local function submit_palcom_request(message)
 
     local submitted_at_ms = now_ms()
     palcom_pending = {
+        broker_start_deadline_at_ms = broker_start_deadline_at_ms,
         request_id = request_id,
         submitted_at_ms = submitted_at_ms,
         next_response_probe_at_ms =
@@ -7265,6 +7335,27 @@ local function poll_palcom_response()
     local current_ms = now_ms()
     local pending_age_ms =
         math.max(0, current_ms - palcom_pending.submitted_at_ms)
+    local start_deadline = tonumber(
+        palcom_pending.broker_start_deadline_at_ms
+    ) or 0
+    if start_deadline > 0 and current_ms >= start_deadline and
+        palcom_status() == nil then
+        os.remove(paths.palcom_request)
+        palcom_pending = nil
+        palcom_private_message(
+            "PalCom",
+            "The broker did not start. Start palworld-mcp-server.exe " ..
+                "--palcom-agent manually and try again.",
+            3
+        )
+        append_audit(
+            "palcom_broker_start_timeout",
+            "palcom_chat",
+            "none",
+            ""
+        )
+        return
+    end
     if pending_age_ms >= CONFIG.palcom_response_timeout_ms then
         scheduler_metrics.palcom_response_timeouts =
             scheduler_metrics.palcom_response_timeouts + 1
@@ -7408,12 +7499,8 @@ local function install_palcom_chat_hook()
                 return
             end
 
-            local status = palcom_status()
-            if status == nil then
-                return
-            end
             local raw_message = palcom_trim(name_string(message))
-            local prefix = palcom_trim(status.prefix)
+            local prefix = palcom_prefix()
             if string.sub(
                 string.lower(raw_message),
                 1,
@@ -7448,7 +7535,43 @@ local function install_palcom_chat_hook()
                 )
                 return
             end
-            local submitted = submit_palcom_request(prompt)
+            local status = palcom_status()
+            local broker_start_deadline_at_ms = nil
+            if status == nil then
+                local started, start_message = start_palcom_broker()
+                if not started then
+                    palcom_private_message(
+                        "PalCom",
+                        "The broker is offline and could not be started: " ..
+                            tostring(start_message) .. ".",
+                        3
+                    )
+                    append_audit(
+                        "palcom_broker_start_failed",
+                        "palcom_chat",
+                        "none",
+                        start_message
+                    )
+                    return
+                end
+                broker_start_deadline_at_ms =
+                    now_ms() + CONFIG.palcom_broker_start_timeout_ms
+                palcom_private_message(
+                    "PalCom",
+                    "The broker was offline; starting it now.",
+                    2
+                )
+                append_audit(
+                    "palcom_broker_start_requested",
+                    "palcom_chat",
+                    "none",
+                    start_message
+                )
+            end
+            local submitted = submit_palcom_request(
+                prompt,
+                broker_start_deadline_at_ms
+            )
             append_audit(
                 submitted and "palcom_captured" or "palcom_queue_failed",
                 "palcom_chat",

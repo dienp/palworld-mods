@@ -14,11 +14,15 @@ When the local PalCom broker is ready, messages beginning with
 chat, and answered through private `PalLogManager` notifications. Messages
 from remote players are ignored.
 
-The broker renews a 15-second readiness lease every five seconds. The hook does
-not consume messages when that lease is absent or stale. One request may be
-active at a
-time; the player gets an immediate private echo, a `Thinking…` acknowledgement,
-and chunked private response notifications.
+The broker renews a 15-second readiness lease every five seconds. When that
+lease is absent or stale, the hook suppresses a matching private command,
+invokes the fixed machine-local launcher provisioned by the MCP server, and
+queues the request while the broker starts. It reports a private failure if the
+launcher is unavailable or the broker does not become ready within 15 seconds.
+Set `palcom_lazy_start_enabled=false` in `bridge-settings.pcb` to require manual
+startup. One request may be active at a time; the player gets an immediate
+private echo, a `Thinking…` acknowledgement, and chunked private response
+notifications.
 
 The request, response, and readiness mailboxes live under
 `%LOCALAPPDATA%\PalworldCompanionBridge` and are separate from the live-tool
