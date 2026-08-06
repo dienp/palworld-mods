@@ -4,6 +4,40 @@ namespace PalworldMcpServer.Tests;
 public sealed class PalComBootstrapTests
 {
     [TestMethod]
+    public void EnabledClientProvisionsLazyStartBootstrap()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"palcom-bootstrap-test-{Guid.NewGuid():N}"
+        );
+        Directory.CreateDirectory(directory);
+        var executable = Path.Combine(directory, "palworld-mcp-server.exe");
+        File.WriteAllBytes(executable, []);
+        try
+        {
+            _ = new LiveBridgeClient(new PalworldConfig
+            {
+                LiveBridgeEnabled = true,
+                LiveBridgeDirectory = directory,
+                PalComChatEnabled = true,
+                PalComChatPrefix = "Hey TestCom,",
+                PalComMcpServerExecutable = executable
+            });
+
+            var bootstrap = LiveBridgeProtocol.Decode(
+                File.ReadAllText(Path.Combine(directory, "palcom-bootstrap.pcb"))
+            );
+            Assert.AreEqual("true", bootstrap["enabled"]);
+            Assert.AreEqual("Hey TestCom,", bootstrap["prefix"]);
+            Assert.IsTrue(File.Exists(bootstrap["launcher"]));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void LauncherSetsExplicitConfigAndStartsBrokerMode()
     {
         var launcher = LiveBridgeClient.BuildPalComLauncher(
