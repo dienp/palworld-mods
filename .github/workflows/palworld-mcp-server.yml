@@ -82,7 +82,7 @@ jobs:
             $releaseRequired = @(
               $changedFiles | Where-Object {
                 $_ -match '^packages/PalworldMcpServer/src/' -or
-                $_ -match '^packages/PalworldCompanionBridge/package/'
+                $_ -match '^packages/PalworldCompanionBridge/package/PalworldCompanionBridge/Scripts/'
               }
             ).Count -gt 0
           }
