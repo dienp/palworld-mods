@@ -319,10 +319,12 @@ The resulting hash must match the entry published in `SHA256SUMS.txt`.
 
 ## GitHub release workflow
 
-The `Palworld MCP Server` GitHub Actions workflow builds and uploads a Windows
-artifact for relevant pushes and pull requests. Its manual trigger accepts a
-version and a `publish_release` switch. A GitHub release is created only when
-that switch is explicitly enabled.
+The `Palworld MCP Server` GitHub Actions workflow builds, tests, smoke-tests,
+and uploads a Windows artifact only when MCP server source, tests, packaging,
+packaged bridge payload, or release metadata changes. Pull requests and
+`codex/**` branches produce CI artifacts without publishing. A related push to
+`main` automatically publishes the versioned GitHub release. The manual
+trigger can also publish when `publish_release` is explicitly enabled.
 
 Before any public release, resolve the `libooz.dll` redistribution note in
 `THIRD-PARTY-NOTICES.md`.

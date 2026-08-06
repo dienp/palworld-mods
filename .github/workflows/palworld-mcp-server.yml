@@ -3,16 +3,30 @@ name: Palworld MCP Server
 on:
   pull_request:
     paths:
-      - "packages/PalworldMcpServer/**"
-      - "packages/PalworldCompanionBridge/**"
+      - "packages/PalworldMcpServer/src/**"
+      - "packages/PalworldMcpServer/tests/**"
+      - "packages/PalworldMcpServer/scripts/**"
+      - "packages/PalworldMcpServer/*.json"
+      - "packages/PalworldMcpServer/*.md"
+      - "packages/PalworldCompanionBridge/package/**"
+      - "packages/PalworldCompanionBridge/project.json"
+      - "packages/PalworldCompanionBridge/mod-project.json"
+      - "scripts/validate-mods.mjs"
       - ".github/workflows/palworld-mcp-server.yml"
   push:
     branches:
       - main
       - "codex/**"
     paths:
-      - "packages/PalworldMcpServer/**"
-      - "packages/PalworldCompanionBridge/**"
+      - "packages/PalworldMcpServer/src/**"
+      - "packages/PalworldMcpServer/tests/**"
+      - "packages/PalworldMcpServer/scripts/**"
+      - "packages/PalworldMcpServer/*.json"
+      - "packages/PalworldMcpServer/*.md"
+      - "packages/PalworldCompanionBridge/package/**"
+      - "packages/PalworldCompanionBridge/project.json"
+      - "packages/PalworldCompanionBridge/mod-project.json"
+      - "scripts/validate-mods.mjs"
       - ".github/workflows/palworld-mcp-server.yml"
   workflow_dispatch:
     inputs:
@@ -101,7 +115,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release)
     needs: build
     runs-on: ubuntu-latest
     permissions:
