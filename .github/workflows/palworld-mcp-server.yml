@@ -67,9 +67,18 @@ jobs:
         shell: pwsh
         run: |
           $releaseRequired = $false
-          if ("${{ github.event_name }}" -eq "push") {
-            $changedFiles = git diff --name-only `
-              "${{ github.event.before }}" "${{ github.sha }}"
+          if (
+            "${{ github.event_name }}" -eq "push" -and
+            "${{ github.ref }}" -eq "refs/heads/main"
+          ) {
+            $before = "${{ github.event.before }}"
+            if ($before -match '^0+$') {
+              $changedFiles = git show --pretty="" --name-only `
+                "${{ github.sha }}"
+            } else {
+              $changedFiles = git diff --name-only `
+                $before "${{ github.sha }}"
+            }
             $releaseRequired = @(
               $changedFiles | Where-Object {
                 $_ -match '^packages/PalworldMcpServer/src/' -or
@@ -77,8 +86,7 @@ jobs:
               }
             ).Count -gt 0
           }
-          "value=$($releaseRequired.ToString().ToLowerInvariant())" >>
-            $env:GITHUB_OUTPUT
+          "value=$($releaseRequired.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
       - name: Select version
         id: version
