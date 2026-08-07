@@ -73,7 +73,12 @@ persistent local override.
 - Palbox paging and base-roster slot/capacity inspection
 - Atomic Palbox-to-base and base-to-Palbox roster swaps using native slot IDs
 - Current-base reinforcement inspection with every worker slot, empty/downed
-  counts, and live healthy Palbox reserves ranked by level
+  counts, and healthy Palbox reserves ranked by level. A running manager
+  already maintains an authoritative queue, so the Palbox is rescanned only
+  when the manager is off or `include_reserves=true` is requested;
+  `data_reserves_live` reports which source answered
+- Optional `include_probe=true` reflection dumps for the raid area, raid
+  metadata, Palbox metadata, and fighter combat surfaces
 - Observe-only and automatic Raid Manager sessions bound to the current owned
   base, with immediate empty-slot filling and event-triggered reinforcement
 - Coalesced container-swap, worker-roster, and supported downed-state event

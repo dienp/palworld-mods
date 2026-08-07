@@ -98,6 +98,63 @@ if (expectedType === 'Lua') {
       console.warn(`${packageName}: consider retaining '${flag}' diagnostics`);
     }
   }
+
+  const luaLines = source.split('\n');
+
+  // A later `name = function(...)` silently overwrites an earlier
+  // `local function name(...)` in the same chunk. That shadowing kept four
+  // dead Raid Manager entry points alive in this file, so reject any
+  // top-level name that is defined more than once.
+  const definitions = new Map();
+  luaLines.forEach((line, index) => {
+    const match =
+      line.match(/^(?:local\s+)?function\s+([A-Za-z_]\w*)\s*\(/) ??
+      line.match(/^(?:local\s+)?([A-Za-z_]\w*)\s*=\s*function\s*\(/);
+    if (!match) {
+      return;
+    }
+    const [, name] = match;
+    if (!definitions.has(name)) {
+      definitions.set(name, []);
+    }
+    definitions.get(name).push(index + 1);
+  });
+
+  const shadowed = [...definitions]
+    .filter(([, at]) => at.length > 1)
+    .map(([name, at]) => `${name} (lines ${at.join(', ')})`);
+  if (shadowed.length > 0) {
+    throw new Error(
+      `${packageName}: duplicate top-level function definitions shadow ` +
+      `earlier ones: ${shadowed.join('; ')}`
+    );
+  }
+
+  // Unreferenced top-level locals cannot be reached from a command, a hook, or
+  // the UE4SS console, so they are dead weight rather than diagnostics. This
+  // is a warning by default so an unrelated mod's backlog cannot block a
+  // release, and an error for packages that have already been cleaned.
+  const unreferenced = [...definitions]
+    .filter(([name, at]) => {
+      if (!/^local\s/.test(luaLines[at[0] - 1])) {
+        return false;
+      }
+      const uses = luaLines.filter(
+        (line, index) =>
+          index !== at[0] - 1 &&
+          new RegExp(`\\b${name}\\b`).test(line)
+      );
+      return uses.length === 0;
+    })
+    .map(([name, at]) => `${name} (line ${at[0]})`);
+  if (unreferenced.length > 0) {
+    const message =
+      `${packageName}: unreferenced local functions: ${unreferenced.join('; ')}`;
+    if (modProject.RejectUnreferencedLuaFunctions === true) {
+      throw new Error(message);
+    }
+    console.warn(message);
+  }
 }
 
 console.log(`Validated ${packageName} ${info.Version} (${expectedType})`);

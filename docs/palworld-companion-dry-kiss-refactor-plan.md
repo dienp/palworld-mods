@@ -1,8 +1,10 @@
 # Palworld Companion Bridge DRY/KISS refactor plan
 
-Status: planned; no refactor implementation or installation has started.
+Status: Stages 1 and 2 are implemented as a source-only change in
+`0.1.0-dev.112`. Stages 3 to 6 are still planned. Nothing has been installed
+or hot reloaded.
 
-Last updated: 2026-08-06
+Last updated: 2026-08-07
 
 ## Objective
 
@@ -20,7 +22,8 @@ The UE4SS Lua entry point is:
 
 `packages/PalworldCompanionBridge/package/PalworldCompanionBridge/Scripts/main.lua`
 
-At the time of this plan:
+At the time this plan was written (historical baseline; see Stages 1 and 2 for
+what has since changed):
 
 - The file is approximately 8,105 lines.
 - Four Raid Manager functions have two definitions, with the later definition
@@ -49,7 +52,7 @@ At the time of this plan:
 - Increment the mod version for every distributed test build.
 - Run `npm run validate` after every payload or metadata change.
 
-## Stage 1: establish guardrails
+## Stage 1: establish guardrails (implemented)
 
 Record and protect:
 
@@ -64,23 +67,75 @@ Record and protect:
   - `4`: `PalRaidBossAreaPhaseBattleState`
   - `5`: `PalRaidBossAreaPhaseResultState`
 
-Add static validation that rejects:
+`scripts/validate-mods.mjs` now rejects, for every Lua package:
 
-- Duplicate function definitions.
-- Known shadowed Raid Manager entry points.
-- Obvious unused local functions where practical.
+- Duplicate top-level function definitions, which covers the known shadowed
+  Raid Manager entry points. A later `name = function(...)` assigns to the
+  earlier `local function name(...)` in the same chunk, so the first definition
+  becomes unreachable without any warning.
+- Unreferenced top-level local functions. This is an error for packages that
+  set `"RejectUnreferencedLuaFunctions": true` in `mod-project.json`
+  (Companion Bridge) and a warning elsewhere, so one mod's dead-code backlog
+  cannot block another mod's release.
 
-## Stage 2: remove shadowed legacy code
+`packages/PalworldCompanionBridge/scripts/smoke.lua` adds the executable half
+of the guardrail. Every engine global the mod touches is already guarded, so a
+plain Lua interpreter can load the chunk, run its initialization path, and
+drive real commands through the command mailbox with no game objects present.
+It asserts that the probe and reserve flags are honored, that Raid Manager
+gating rejects activation without a loaded roster, that an unknown action is
+refused, and that bare scheduler wakes write a heartbeat without raising. It
+runs as the `smoke` target, which `validate` depends on; a machine without a
+Lua interpreter skips it with a warning instead of failing, since a standalone
+interpreter is not part of the Windows modding toolchain.
 
-- Remove the obsolete definitions of:
-  - `pcb_get_raid_state`
-  - `pcb_set_raid_manager`
-  - `pcb_stop_raid_manager`
-  - `pcb_raid_manager_tick`
-- Remove genuinely dead helpers.
-- Preserve useful diagnostic probes by routing them through the single
-  authoritative `get_raid_state` implementation.
-- Make no intentional runtime behavior changes in this stage.
+This does not replace live verification. It protects the remaining stages from
+load-order, nil-call, and protocol regressions on any platform.
+
+## Stage 2: remove shadowed legacy code (implemented)
+
+`main.lua` went from 8,228 to 6,423 lines.
+
+- Removed the shadowed first definitions of `pcb_get_raid_state`,
+  `pcb_set_raid_manager`, `pcb_stop_raid_manager`, and
+  `pcb_raid_manager_tick`, and restored the four survivors as ordinary
+  `local function` declarations.
+- Removed the legacy tick-driven raid path that only those definitions used:
+  the nearby-controller fighter scan (`pcb_collect_raid_fighters`,
+  `pcb_raid_controller_classes`, `raid_controller_class_cache`,
+  `raid_fighter_cache`) and the duplicate raid-activity detector
+  (`pcb_raid_objects`, `pcb_raid_class_candidates`). Raid phase now has one
+  authoritative source, `pcb_raid_area_roster`, and the fighter roster one
+  authoritative source, the deployment container.
+- Removed unreachable helpers: `legacy_inventory_snapshot`,
+  `relevant_inventory_surface`, `assignment_surface`, `probe_roster_surface`,
+  `probe_assignment_surface`, `local_player_uid`, `distance_squared`,
+  `vector_components`, `pcb_notify_base_worker_slot_changed`, and
+  `pcb_parse_ranked_reserves`.
+- Removed write-only Raid Manager state that nothing read after the legacy
+  path went away: `reserve_count`, `fighter_count`, `downed_count`,
+  `auto_deployable_count`, `base_name`, and `tick_count`. `reserve_count` and
+  `fighter_count` duplicated `#raid_manager.reserves` and
+  `deployed_count`; `auto_deployable_count` was recomputed from live lists
+  three times per reinforcement pass and never read.
+- Preserved the diagnostic probes by routing them through the authoritative
+  `get_raid_state`: `include_probe` emits the raid-area, raid-metadata,
+  Palbox-metadata, module-declaration, and combat reflection dumps, and the
+  reserve census samples. Both advertised flags were previously accepted and
+  ignored.
+- Restored two diagnostics the surviving implementation had dropped:
+  `data_expected_fighter_queue_last_reason`, and the cumulative
+  `data_deployment_count` and `data_replacement_count`. Published
+  `readiness_controller_available` and `readiness_world_key` in the heartbeat
+  rather than delete the two readiness fields nothing read.
+
+One intentional behavior change, ahead of Stage 5 because it fell out of the
+same code:
+
+- `get_raid_state` no longer forces a full Palbox scan on every call. A running
+  manager already maintains an authoritative reserve queue, so the scan now
+  happens only when the manager is off or `include_reserves` is requested.
+  `data_reserves_live` reports which source answered.
 
 ## Stage 3: consolidate small primitives
 
