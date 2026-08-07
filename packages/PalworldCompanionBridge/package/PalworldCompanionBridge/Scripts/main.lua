@@ -1,5 +1,5 @@
 local MOD_NAME = "PalworldCompanionBridge"
-local MOD_VERSION = "0.1.0-dev.112"
+local MOD_VERSION = "0.1.0-dev.113"
 local PROTOCOL_HEADER = "PALWORLD_COMPANION_BRIDGE/1"
 
 local CONFIG = {
@@ -91,10 +91,15 @@ local scheduler_metrics = {
     reinforcement_event_coalesced = 0,
     reinforcement_event_passes = 0,
     reinforcement_integrity_passes = 0,
+    -- Integrity passes that actually had work to do. Every one of these is
+    -- reinforcement the event hooks failed to request, so this is the
+    -- measurement that gates removing the periodic fallback.
+    reinforcement_integrity_effective = 0,
     reinforcement_hooks_installed = 0,
     roster_scans = 0,
     palbox_scans = 0,
     last_reinforcement_pass_ms = 0,
+    last_queue_build_ms = 0,
     worker_trace_network_moves = 0,
     worker_trace_network_swaps = 0,
     worker_trace_slot_updates = 0,
@@ -109,6 +114,13 @@ local scheduler_metrics = {
     worker_trace_observer_container_slots = 0,
     worker_trace_observer_container_size = 0,
 }
+-- Raid Manager has exactly four states. `mode` is what the player asked for
+-- (off, observe, or auto); `manager_state` is what the manager is doing now.
+local MANAGER_STATE_OFF = "off"
+local MANAGER_STATE_DEPLOYING = "deploying"
+local MANAGER_STATE_ACTIVE = "active"
+local MANAGER_STATE_WAITING = "waiting_for_reserves"
+
 local raid_manager = {
     mode = "off",
     base_id = "",
@@ -127,7 +139,7 @@ local raid_manager = {
     replacement_count = 0,
     deployment_count = 0,
     sequence = 0,
-    manager_state = "",
+    manager_state = MANAGER_STATE_OFF,
     reinforcement_pass_requested = false,
     reinforcement_request_reason = "",
     reinforcement_pass_running = false,
@@ -2268,14 +2280,24 @@ local function current_work_matches(parameter, target_work, target_work_id)
     return current_id ~= "" and current_id == target_work_id, current
 end
 
-local function action_notification(success, text)
+-- Notification severity is named rather than a boolean. Palworld's Pal log
+-- takes a 1-3 priority; these are the only three this mod uses.
+local NOTIFICATION_PRIORITY = {
+    normal = 1,
+    warning = 2,
+    persistent = 3,
+}
+
+local function notify(severity, text)
     local clipped = string.sub(
         tostring(text),
         1,
         CONFIG.maximum_message_length
     )
-    local displayed, notification_error =
-        display_notification(clipped, success and 1 or 2)
+    local displayed, notification_error = display_notification(
+        clipped,
+        NOTIFICATION_PRIORITY[severity] or NOTIFICATION_PRIORITY.normal
+    )
     return displayed, notification_error, clipped
 end
 
@@ -2313,14 +2335,14 @@ local function assign_pal_to_station(command, dry_run)
             "Pal is not an active worker at the requested loaded base." or
             "Station is not a loaded work target at the requested base."
         if not dry_run then
-            action_notification(false, "Companion: " .. failure)
+            notify("warning", "Companion: " .. failure)
         end
         return false, failure, {}
     end
     if selected_station.work_id == "" then
         local failure = "Target station has no readable work ID."
         if not dry_run then
-            action_notification(false, "Companion: " .. failure)
+            notify("warning", "Companion: " .. failure)
         end
         return false, failure, {}
     end
@@ -2370,7 +2392,7 @@ local function assign_pal_to_station(command, dry_run)
             " is already assigned to " .. station_label ..
             " at " .. base_label .. "."
         local displayed, notification_error =
-            action_notification(true, text)
+            notify("normal", text)
         return true, "Pal was already fixed to the requested station.", {
             data_already_assigned = "true",
             data_base_id = base_id,
@@ -2409,7 +2431,7 @@ local function assign_pal_to_station(command, dry_run)
         local text = "Companion: assigned " .. pal_label ..
             " to " .. station_label .. " at " .. base_label .. "."
         local displayed, notification_error =
-            action_notification(true, text)
+            notify("normal", text)
         return true, "Pal assignment applied and verified.", {
             data_base_id = base_id,
             data_notification_displayed =
@@ -2459,8 +2481,8 @@ local function assign_pal_to_station(command, dry_run)
     local rollback_text = rollback_attempted and
         (rollback_verified and " Previous assignment restored." or
             " Rollback could not be verified.") or ""
-    local displayed, notification_error = action_notification(
-        false,
+    local displayed, notification_error = notify(
+        "warning",
         "Companion: assignment failed for " .. pal_label ..
             "." .. rollback_text
     )
@@ -2878,6 +2900,22 @@ function pcb_find_palbox_slot(storage, target_pal_id)
         end
     end
     return nil
+end
+
+-- Palbox lookups always know where a Pal was last seen. Check that slot first
+-- and only fall back to the full page scan, which reads up to 30 slots per
+-- page across every page.
+function pcb_resolve_palbox_slot(storage, target_pal_id, page, index)
+    if page ~= nil and index ~= nil then
+        local slot = nil
+        pcall(function()
+            slot = unwrap(storage:GetSlot(page, index))
+        end)
+        if pcb_slot_identity(slot) == target_pal_id then
+            return {index = index, page = page, slot = slot}
+        end
+    end
+    return pcb_find_palbox_slot(storage, target_pal_id)
 end
 
 function pcb_find_empty_palbox_slot(storage)
@@ -3840,6 +3878,30 @@ local function pcb_raid_reserve_signature(reserve, include_health)
     return table.concat(values, ":")
 end
 
+local function pcb_recount_invalidated_reserves()
+    local count = 0
+    for _ in pairs(raid_manager.invalidated_reserves) do
+        count = count + 1
+    end
+    raid_manager.invalidated_reserve_count = count
+    return count
+end
+
+-- A reserve is usable only when its level and downed state are both
+-- authoritative and it is not downed. Anything else is a reason to skip it.
+local function pcb_reserve_rejection(combat)
+    if not combat.downed_known then
+        return "reserve health became unavailable"
+    end
+    if combat.downed then
+        return "reserve became unhealthy"
+    end
+    if combat.level == nil then
+        return "reserve level became unavailable"
+    end
+    return nil
+end
+
 local function pcb_invalidate_raid_reserve(
     reserve,
     reason,
@@ -3856,14 +3918,11 @@ local function pcb_invalidate_raid_reserve(
         ),
         unlock_on_health_change = unlock_on_health_change == true,
     }
-    local count = 0
-    for _ in pairs(raid_manager.invalidated_reserves) do
-        count = count + 1
-    end
-    raid_manager.invalidated_reserve_count = count
+    pcb_recount_invalidated_reserves()
 end
 
 local function pcb_rebuild_raid_queue(reason)
+    local build_started_at = os.clock()
     local diagnostics = {}
     local candidates = pcb_collect_raid_reserves(diagnostics)
     local reserves = {}
@@ -3882,11 +3941,7 @@ local function pcb_rebuild_raid_queue(reason)
             table.insert(reserves, candidate)
         end
     end
-    local invalidated_count = 0
-    for _ in pairs(raid_manager.invalidated_reserves) do
-        invalidated_count = invalidated_count + 1
-    end
-    raid_manager.invalidated_reserve_count = invalidated_count
+    pcb_recount_invalidated_reserves()
     local deployment = pcb_raid_deployment_state(raid_manager.base_id)
     raid_manager.reserves = reserves
     raid_manager.healthy_palbox_count =
@@ -3899,6 +3954,8 @@ local function pcb_rebuild_raid_queue(reason)
     raid_manager.queue_rebuild_count =
         raid_manager.queue_rebuild_count + 1
     raid_manager.queue_rebuild_reason = tostring(reason or "periodic")
+    scheduler_metrics.last_queue_build_ms =
+        math.floor((os.clock() - build_started_at) * 1000)
     return deployment, diagnostics
 end
 
@@ -3906,22 +3963,12 @@ local function pcb_take_healthy_raid_reserve()
     local storage = pcb_player_pal_storage()
     while #raid_manager.reserves > 0 do
         local candidate = table.remove(raid_manager.reserves, 1)
-        local live_slot = nil
-        local candidate_slot = nil
-        pcall(function()
-            candidate_slot =
-                unwrap(storage:GetSlot(candidate.page, candidate.index))
-        end)
-        if pcb_slot_identity(candidate_slot) == candidate.pal_id then
-            live_slot = {
-                index = candidate.index,
-                page = candidate.page,
-                slot = candidate_slot,
-            }
-        else
-            live_slot =
-                pcb_find_palbox_slot(storage, candidate.pal_id)
-        end
+        local live_slot = pcb_resolve_palbox_slot(
+            storage,
+            candidate.pal_id,
+            candidate.page,
+            candidate.index
+        )
         if live_slot ~= nil then
             local _, _, _, _, individual =
                 pcb_slot_identity(live_slot.slot)
@@ -3930,15 +3977,13 @@ local function pcb_take_healthy_raid_reserve()
             candidate.index = live_slot.index
             candidate.level = combat.level or candidate.level
             candidate.hp = combat.hp
-            if combat.level ~= nil and combat.downed_known and
-                not combat.downed then
+            local rejection = pcb_reserve_rejection(combat)
+            if rejection == nil then
                 return candidate
             end
             pcb_invalidate_raid_reserve(
                 candidate,
-                combat.downed_known and
-                    "reserve became unhealthy" or
-                    "reserve health became unavailable",
+                rejection,
                 combat.downed_known and combat.downed
             )
         else
@@ -3949,6 +3994,109 @@ local function pcb_take_healthy_raid_reserve()
         end
     end
     return nil
+end
+
+-- One authoritative Raid Manager reset. Every stop path and activation goes
+-- through this, so no field is ever left behind. The cumulative counters are
+-- deliberately not cleared here: they describe the session that just ended and
+-- activation zeroes them when a new one begins.
+local function pcb_reset_raid_manager_state()
+    raid_manager.base_id = ""
+    raid_manager.healthy_palbox_count = 0
+    raid_manager.palbox_occupied_count = 0
+    raid_manager.deployment_capacity = 0
+    raid_manager.deployed_count = 0
+    raid_manager.queue_built_at_ms = 0
+    raid_manager.queue_rebuild_count = 0
+    raid_manager.queue_rebuild_reason = ""
+    raid_manager.invalidated_reserves = {}
+    raid_manager.invalidated_reserve_count = 0
+    raid_manager.started_at_ms = 0
+    raid_manager.last_check_at_ms = 0
+    raid_manager.manager_state = MANAGER_STATE_OFF
+    raid_manager.reinforcement_pass_requested = false
+    raid_manager.reinforcement_request_reason = ""
+    raid_manager.reinforcement_pass_running = false
+    raid_manager.raid_phase_missing_samples = 0
+    raid_manager.raid_phase_seen_battle = false
+    raid_manager.raid_phase_state = ""
+    raid_manager.next_bulk_deploy_at_ms = 0
+    raid_manager.zero_healthy_warned = false
+    raid_manager.reserves = {}
+end
+
+local function pcb_stop_raid_manager(reason, notify_player)
+    pcb_reset_raid_manager_state()
+    raid_manager.mode = "off"
+    raid_manager.stopped_reason = tostring(reason or "stopped")
+    if notify_player then
+        notify(
+            "normal",
+            "PalCom: Raid Manager stopped - " ..
+                raid_manager.stopped_reason .. "."
+        )
+    end
+end
+
+-- Every roster write needs the same four identities, and a missing one is
+-- always fatal. Resolve them once here instead of in each caller.
+local function pcb_worker_move_identity(base_id, model, container)
+    local base_network = pcb_live_network_base_camp()
+    local container_id = nil
+    local native_base_id = nil
+    pcall(function()
+        container_id = container:GetId()
+        native_base_id = model:GetId()
+    end)
+    local palbox_map_object_id, palbox_map_object =
+        pcb_base_palbox_map_object_id(base_id, model)
+    if not is_valid(base_network) or container_id == nil or
+        native_base_id == nil or palbox_map_object_id == nil then
+        return nil
+    end
+    return {
+        base_network = base_network,
+        container_id = container_id,
+        native_base_id = native_base_id,
+        palbox_map_object = palbox_map_object,
+        palbox_map_object_id = palbox_map_object_id,
+    }
+end
+
+-- The two authoritative worker RPCs. A generic container swap moves the
+-- roster entry without running the worker spawn lifecycle, so anything that
+-- must be visible in the world goes through these.
+local function pcb_request_worker_deploy(identity, palbox_slot_id)
+    return pcall(function()
+        identity.base_network:RequestMoveCharacterToWorker_ToServer(
+            identity.native_base_id,
+            palbox_slot_id,
+            identity.container_id,
+            identity.palbox_map_object_id
+        )
+    end)
+end
+
+local function pcb_request_worker_withdraw(
+    identity,
+    base_slot_id,
+    palbox_page
+)
+    return pcall(function()
+        identity.base_network:RequestMoveWorkerToPalBox_ToServer(
+            identity.native_base_id,
+            base_slot_id,
+            palbox_page,
+            identity.palbox_map_object_id
+        )
+    end)
+end
+
+-- A move counts as verified only when the Pal reached the target slot and
+-- left the source slot.
+local function pcb_move_verified(source_slot, target_slot, pal_id)
+    return pcb_slot_identity(target_slot) == pal_id and
+        pcb_slot_identity(source_slot) ~= pal_id
 end
 
 local function pcb_deploy_raid_pal(
@@ -3974,21 +4122,12 @@ local function pcb_deploy_raid_pal(
             {}
     end
     local target = requested_target or deployment.empty_slots[1]
-    local source = nil
-    local expected_slot = nil
-    pcall(function()
-        expected_slot =
-            unwrap(storage:GetSlot(reserve.page, reserve.index))
-    end)
-    if pcb_slot_identity(expected_slot) == reserve.pal_id then
-        source = {
-            index = reserve.index,
-            page = reserve.page,
-            slot = expected_slot,
-        }
-    else
-        source = pcb_find_palbox_slot(storage, reserve.pal_id)
-    end
+    local source = pcb_resolve_palbox_slot(
+        storage,
+        reserve.pal_id,
+        reserve.page,
+        reserve.index
+    )
     if target == nil then
         return false, "The base has no empty Pal slots.", {}
     end
@@ -4023,50 +4162,43 @@ local function pcb_deploy_raid_pal(
 
     local source_slot_id = nil
     local target_slot_id = nil
-    local base_container_id = nil
-    local native_base_id = nil
     pcall(function()
         source_slot_id = source.slot:GetSlotId()
         target_slot_id = target.slot:GetSlotId()
-        base_container_id = deployment.container:GetId()
-        native_base_id = deployment.model:GetId()
     end)
-    local palbox_map_object_id, palbox_map_object =
-        pcb_base_palbox_map_object_id(base_id, deployment.model)
+    local identity = pcb_worker_move_identity(
+        base_id,
+        deployment.model,
+        deployment.container
+    )
     if source_slot_id == nil or target_slot_id == nil or
-        base_container_id == nil or native_base_id == nil or
-        palbox_map_object_id == nil then
+        identity == nil then
         return false, "Base deployment identity is unavailable.", {}
     end
     local visible_lifecycle = use_visible_lifecycle ~= false
     local request_method = visible_lifecycle and
         "RequestMoveCharacterToWorker_ToServer" or
         "RequestSwap_ToServer_Rep"
-    local request_ok, request_error = pcall(function()
-        if visible_lifecycle then
-            base_network:RequestMoveCharacterToWorker_ToServer(
-                native_base_id,
-                source_slot_id,
-                base_container_id,
-                palbox_map_object_id
-            )
-        else
+    local request_ok, request_error
+    if visible_lifecycle then
+        request_ok, request_error =
+            pcb_request_worker_deploy(identity, source_slot_id)
+    else
+        request_ok, request_error = pcall(function()
             network:RequestSwap_ToServer_Rep(
                 source_slot_id,
                 target_slot_id
             )
-        end
-    end)
+        end)
+    end
     local target_pal_id = pcb_slot_identity(target.slot)
     local source_pal_id = pcb_slot_identity(source.slot)
-    local verified = request_ok and
-        target_pal_id == reserve.pal_id and
-        source_pal_id ~= reserve.pal_id
-    if verified then
+    if request_ok and
+        pcb_move_verified(source.slot, target.slot, reserve.pal_id) then
         return true, "Base Pal deployed and verified.", {
             data_base_id = base_id,
             data_reserve_pal_id = reserve.pal_id,
-            data_palbox_map_object = palbox_map_object,
+            data_palbox_map_object = identity.palbox_map_object,
             data_request_method = request_method,
             data_source = source_location,
             data_target = target_location,
@@ -4088,21 +4220,21 @@ local function pcb_deploy_raid_pal(
     local rollback_ok = false
     local rollback_error = ""
     if target_pal_id == reserve.pal_id then
-        local ok, error_value = pcall(function()
-            if visible_lifecycle then
-                base_network:RequestMoveWorkerToPalBox_ToServer(
-                    native_base_id,
-                    target_slot_id,
-                    source.page,
-                    palbox_map_object_id
-                )
-            else
+        local ok, error_value
+        if visible_lifecycle then
+            ok, error_value = pcb_request_worker_withdraw(
+                identity,
+                target_slot_id,
+                source.page
+            )
+        else
+            ok, error_value = pcall(function()
                 network:RequestSwap_ToServer_Rep(
                     target_slot_id,
                     source_slot_id
                 )
-            end
-        end)
+            end)
+        end
         rollback_ok = ok and
             pcb_slot_identity(source.slot) == reserve.pal_id
         if not ok then
@@ -4238,24 +4370,12 @@ function pcb_swap_raid_pal(command, dry_run)
     end
 
     local downed_slot = pcb_find_base_slot(container, downed_pal_id)
-    local reserve_slot = nil
-    if reserve_page ~= nil and reserve_index ~= nil then
-        local expected_slot = nil
-        pcall(function()
-            expected_slot =
-                unwrap(storage:GetSlot(reserve_page, reserve_index))
-        end)
-        if pcb_slot_identity(expected_slot) == reserve_pal_id then
-            reserve_slot = {
-                index = reserve_index,
-                page = reserve_page,
-                slot = expected_slot,
-            }
-        end
-    end
-    if reserve_slot == nil then
-        reserve_slot = pcb_find_palbox_slot(storage, reserve_pal_id)
-    end
+    local reserve_slot = pcb_resolve_palbox_slot(
+        storage,
+        reserve_pal_id,
+        reserve_page,
+        reserve_index
+    )
     if downed_slot == nil or reserve_slot == nil then
         return false,
             "The expected fighter or reserve was not found in its live roster.",
@@ -4298,30 +4418,18 @@ function pcb_swap_raid_pal(command, dry_run)
     end
 
     local empty_palbox_slot = pcb_find_empty_palbox_slot(storage)
-    local base_container_id = nil
-    local native_base_id = nil
-    pcall(function()
-        base_container_id = container:GetId()
-        native_base_id = model:GetId()
-    end)
-    local palbox_map_object_id, palbox_map_object =
-        pcb_base_palbox_map_object_id(base_id, model)
-    if empty_palbox_slot == nil or base_container_id == nil or
-        native_base_id == nil or palbox_map_object_id == nil then
+    local identity = pcb_worker_move_identity(base_id, model, container)
+    if empty_palbox_slot == nil or identity == nil then
         return false, "Base replacement identity is unavailable.", {}
     end
 
-    -- A generic container swap changes the roster without creating a worker
-    -- actor. Mirror the Palbox UI: withdraw the downed worker, then deploy the
+    -- Mirror the Palbox UI: withdraw the downed worker, then deploy the
     -- healthy reserve through the dedicated base-worker RPC.
-    local withdraw_ok, withdraw_error = pcall(function()
-        base_network:RequestMoveWorkerToPalBox_ToServer(
-            native_base_id,
-            target_slot_id,
-            empty_palbox_slot.page,
-            palbox_map_object_id
-        )
-    end)
+    local withdraw_ok, withdraw_error = pcb_request_worker_withdraw(
+        identity,
+        target_slot_id,
+        empty_palbox_slot.page
+    )
     local withdrawn_slot =
         withdraw_ok and pcb_find_palbox_slot(storage, downed_pal_id) or nil
     local base_slot_pal_id = pcb_slot_identity(downed_slot.slot)
@@ -4332,7 +4440,7 @@ function pcb_swap_raid_pal(command, dry_run)
                 "Downed base Pal withdrawal did not verify." or
                 tostring(withdraw_error), {
                 data_candidate_invalid = "false",
-                data_palbox_map_object = palbox_map_object,
+                data_palbox_map_object = identity.palbox_map_object,
                 data_request_method =
                     "RequestMoveWorkerToPalBox_ToServer",
                 data_verified = "false",
@@ -4352,7 +4460,7 @@ function pcb_swap_raid_pal(command, dry_run)
         return true, "Downed base Pal replaced and verified.", {
             data_base_id = base_id,
             data_downed_pal_id = downed_pal_id,
-            data_palbox_map_object = palbox_map_object,
+            data_palbox_map_object = identity.palbox_map_object,
             data_request_method =
                 "RequestMoveWorkerToPalBox_ToServer+" ..
                 "RequestMoveCharacterToWorker_ToServer",
@@ -4370,14 +4478,8 @@ function pcb_swap_raid_pal(command, dry_run)
         pcall(function()
             withdrawn_slot_id = withdrawn_slot.slot:GetSlotId()
         end)
-        local ok, error_value = pcall(function()
-            base_network:RequestMoveCharacterToWorker_ToServer(
-                native_base_id,
-                withdrawn_slot_id,
-                base_container_id,
-                palbox_map_object_id
-            )
-        end)
+        local ok, error_value =
+            pcb_request_worker_deploy(identity, withdrawn_slot_id)
         rollback_ok = ok and
             pcb_slot_identity(downed_slot.slot) == downed_pal_id and
             pcb_find_palbox_slot(storage, downed_pal_id) == nil
@@ -4385,9 +4487,9 @@ function pcb_swap_raid_pal(command, dry_run)
             rollback_error = tostring(error_value)
         end
     end
-    raid_manager.mode = "off"
-    raid_manager.stopped_reason =
-        "replacement verification failed"
+    -- A half-applied replacement must stop the manager through the single
+    -- authoritative reset, not by clearing two fields here.
+    pcb_stop_raid_manager("replacement verification failed", true)
     return false, deploy_message, {
             data_deploy_details = tostring(deploy_details),
             data_rollback_error = rollback_error,
@@ -4396,36 +4498,45 @@ function pcb_swap_raid_pal(command, dry_run)
         }
 end
 
-local function pcb_stop_raid_manager(reason, notify)
-    raid_manager.mode = "off"
-    raid_manager.stopped_reason = tostring(reason or "stopped")
-    raid_manager.base_id = ""
-    raid_manager.healthy_palbox_count = 0
-    raid_manager.palbox_occupied_count = 0
-    raid_manager.deployment_capacity = 0
-    raid_manager.deployed_count = 0
-    raid_manager.queue_built_at_ms = 0
-    raid_manager.queue_rebuild_count = 0
-    raid_manager.queue_rebuild_reason = ""
-    raid_manager.invalidated_reserves = {}
-    raid_manager.invalidated_reserve_count = 0
-    raid_manager.started_at_ms = 0
-    raid_manager.last_check_at_ms = 0
-    raid_manager.manager_state = ""
-    raid_manager.reinforcement_pass_requested = false
-    raid_manager.reinforcement_request_reason = ""
-    raid_manager.reinforcement_pass_running = false
-    raid_manager.raid_phase_missing_samples = 0
-    raid_manager.raid_phase_seen_battle = false
-    raid_manager.raid_phase_state = ""
-    raid_manager.next_bulk_deploy_at_ms = 0
-    raid_manager.zero_healthy_warned = false
-    raid_manager.reserves = {}
-    if notify then
-        display_notification(
-            "PalCom: Raid Manager stopped - " ..
-                raid_manager.stopped_reason .. ".",
-            1
+-- The single raid-phase sampler. Battle completion stays transition-based: a
+-- positively observed Battle phase arms the latch, a later valid non-Battle
+-- phase stops the manager, and two consecutive missing instance samples after
+-- Battle are the guarded fallback. The 15-minute watchdog remains the last
+-- resort. Called from the readiness refresh, which is the only place that
+-- already reads the raid area.
+local function pcb_observe_raid_phase(instance, raid_context)
+    if raid_manager.mode == "off" then
+        return
+    end
+    local phase_state = full_name(raid_context.phase_state)
+    raid_manager.raid_phase_state = phase_state
+    local phase_is_battle = string.find(
+        phase_state,
+        "PalRaidBossAreaPhaseBattleState",
+        1,
+        true
+    ) ~= nil
+    if phase_is_battle then
+        raid_manager.raid_phase_seen_battle = true
+        raid_manager.raid_phase_missing_samples = 0
+        return
+    end
+    if is_valid(instance) and is_valid(raid_context.phase_state) then
+        raid_manager.raid_phase_missing_samples = 0
+        if raid_manager.raid_phase_seen_battle then
+            pcb_stop_raid_manager("raid battle phase ended", true)
+        end
+        return
+    end
+    if not raid_manager.raid_phase_seen_battle then
+        return
+    end
+    raid_manager.raid_phase_missing_samples =
+        raid_manager.raid_phase_missing_samples + 1
+    if raid_manager.raid_phase_missing_samples >= 2 then
+        pcb_stop_raid_manager(
+            "raid instance disappeared after battle",
+            true
         )
     end
 end
@@ -4435,9 +4546,9 @@ local function pcb_warn_no_healthy_reserves()
         return
     end
     raid_manager.zero_healthy_warned = true
-    raid_manager.manager_state = "waiting_for_healthy_reserves"
-    action_notification(
-        false,
+    raid_manager.manager_state = MANAGER_STATE_WAITING
+    notify(
+        "warning",
         "PalCom: Raid Manager has no healthy Palbox Pals left."
     )
 end
@@ -4488,7 +4599,7 @@ local function pcb_run_base_reinforcement_pass(reason)
         raid_manager.reinforcement_pass_running = false
         scheduler_metrics.last_reinforcement_pass_ms =
             math.floor((os.clock() - pass_started_at) * 1000)
-        raid_manager.manager_state = "observing"
+        raid_manager.manager_state = MANAGER_STATE_ACTIVE
         return 0, 0
     end
     if not get_settings().write_actions_enabled then
@@ -4551,18 +4662,24 @@ local function pcb_run_base_reinforcement_pass(reason)
         return false
     end
 
+    -- One roster-write budget for the whole pass. A wipe can leave every slot
+    -- downed at once, and replacing them all in a single dispatcher pass would
+    -- make the game reconcile that many actors in one frame. Whatever is left
+    -- over continues on the next wake through the existing coalesced request.
+    local write_budget = math.max(1, CONFIG.raid_bulk_deploy_batch_size)
     for _, fighter in ipairs(downed) do
-        if raid_manager.mode == "off" or
+        if write_budget <= 0 or raid_manager.mode == "off" or
             not use_reserve("replace", fighter) then
             break
         end
         replacements = replacements + 1
+        write_budget = write_budget - 1
     end
     if raid_manager.mode ~= "off" then
         local bulk_deployment_count = math.min(
             #deployment.empty_slots,
             #raid_manager.reserves,
-            CONFIG.raid_bulk_deploy_batch_size
+            write_budget
         )
         for index = 1, bulk_deployment_count do
             local empty_slot = deployment.empty_slots[index]
@@ -4591,14 +4708,17 @@ local function pcb_run_base_reinforcement_pass(reason)
         pcb_raid_deployment_state(raid_manager.base_id)
     raid_manager.deployment_capacity = refreshed.capacity
     raid_manager.deployed_count = refreshed.deployed
+    -- Either kind of leftover work continues the same way: downed fighters the
+    -- write budget did not reach, or empty slots still waiting on a reserve.
+    local replacements_pending = replacements < #downed
     local bulk_deployment_pending =
         raid_manager.mode ~= "off" and
-        #refreshed.empty_slots > 0 and
-        #raid_manager.reserves > 0
+        #raid_manager.reserves > 0 and
+        (#refreshed.empty_slots > 0 or replacements_pending)
     if bulk_deployment_pending then
         -- Continue on the next existing 500 ms dispatcher wakeup. Each batch
-        -- stages N-1 roster swaps and performs one authoritative worker move,
-        -- limiting how many actors the game reconciles in a single frame.
+        -- performs one authoritative worker move, limiting how many actors the
+        -- game reconciles in a single frame.
         raid_manager.reinforcement_pass_requested = true
         raid_manager.reinforcement_request_reason =
             "bulk-deployment-continuation"
@@ -4611,13 +4731,14 @@ local function pcb_run_base_reinforcement_pass(reason)
         pcb_warn_no_healthy_reserves()
     elseif raid_manager.mode ~= "off" then
         raid_manager.zero_healthy_warned = false
-        raid_manager.manager_state = "active"
+        raid_manager.manager_state = bulk_deployment_pending and
+            MANAGER_STATE_DEPLOYING or MANAGER_STATE_ACTIVE
     end
     if replacements > 0 and
         not bulk_deployment_pending and
         not raid_manager.zero_healthy_warned then
-        action_notification(
-            true,
+        notify(
+            "normal",
             "PalCom: Raid Manager " ..
                 tostring(reason or "check") .. " deployed " ..
                 tostring(deployments) .. " and replaced " ..
@@ -4641,7 +4762,7 @@ local function pcb_set_raid_manager(command, dry_run)
     if mode == "off" then
         if not dry_run then
             pcb_stop_raid_manager("stopped by player", false)
-            action_notification(true, "PalCom: Raid Manager stopped.")
+            notify("normal", "PalCom: Raid Manager stopped.")
         end
         return true,
             dry_run and
@@ -4714,23 +4835,17 @@ local function pcb_set_raid_manager(command, dry_run)
             details
     end
 
+    -- Start from the same baseline every stop leaves behind, then apply the
+    -- live activation values. A new session also zeroes the cumulative
+    -- counters that a stop deliberately preserves.
+    pcb_reset_raid_manager_state()
     raid_manager.mode = mode
     raid_manager.base_id = base_id
     raid_manager.stopped_reason = ""
     raid_manager.replacement_count = 0
     raid_manager.deployment_count = 0
     raid_manager.sequence = 0
-    raid_manager.manager_state =
-        mode == "auto" and "active" or "observing"
-    raid_manager.reinforcement_pass_requested = false
-    raid_manager.reinforcement_request_reason = ""
-    raid_manager.reinforcement_pass_running = false
-    raid_manager.raid_phase_missing_samples = 0
-    raid_manager.raid_phase_seen_battle = false
-    raid_manager.raid_phase_state = ""
-    raid_manager.next_bulk_deploy_at_ms = 0
-    raid_manager.invalidated_reserves = {}
-    raid_manager.invalidated_reserve_count = 0
+    raid_manager.manager_state = MANAGER_STATE_ACTIVE
     raid_manager.reserves = reserves
     raid_manager.healthy_palbox_count =
         tonumber(reserve_diagnostics.healthy) or #reserves
@@ -4743,7 +4858,6 @@ local function pcb_set_raid_manager(command, dry_run)
     raid_manager.queue_rebuild_reason = "activation"
     raid_manager.started_at_ms = now_ms()
     raid_manager.last_check_at_ms = raid_manager.started_at_ms
-    raid_manager.zero_healthy_warned = false
 
     local deployed_now = 0
     local replaced_now = 0
@@ -4783,8 +4897,8 @@ local function pcb_set_raid_manager(command, dry_run)
     details.data_expected_fighter_queue_count =
         tostring(#raid_manager.reserves)
     if not raid_manager.zero_healthy_warned then
-        action_notification(
-            true,
+        notify(
+            "normal",
             mode == "auto" and
                 "PalCom: Raid Manager active for " ..
                     base_name .. "." or
@@ -5031,7 +5145,14 @@ local function pcb_raid_manager_tick()
     local reason = event_requested and
         raid_manager.reinforcement_request_reason or
         (queue_due and "queue-refresh" or "integrity")
-    pcb_run_base_reinforcement_pass(reason)
+    local deployments, replacements =
+        pcb_run_base_reinforcement_pass(reason)
+    -- Work found by a periodic pass is work the event hooks did not request.
+    -- Counting it is what tells us whether the fallback can eventually go.
+    if not event_requested and (deployments > 0 or replacements > 0) then
+        scheduler_metrics.reinforcement_integrity_effective =
+            scheduler_metrics.reinforcement_integrity_effective + 1
+    end
 end
 
 function pcb_move_pal_roster(command, dry_run)
@@ -5098,7 +5219,7 @@ function pcb_move_pal_roster(command, dry_run)
             "Companion: Pal is already assigned to " .. base_label .. "." or
             "Companion: Pal is already in the Palbox."
         if not dry_run then
-            action_notification(true, text)
+            notify("normal", text)
         end
         return true, "Pal is already in the requested roster.", {
             data_already_there = "true",
@@ -5134,28 +5255,14 @@ function pcb_move_pal_roster(command, dry_run)
         target_slot_id = target.slot:GetSlotId()
     end)
     if source_slot_id == nil or target_slot_id == nil then
-        action_notification(false, "Companion: roster move failed; slot IDs unavailable.")
+        notify("warning", "Companion: roster move failed; slot IDs unavailable.")
         return false, "Source or target slot ID is unavailable.", {}
     end
 
-    local base_container_id = nil
-    local palbox_container = nil
-    local palbox_container_id = nil
-    local native_base_id = nil
-    local palbox_map_object_id = nil
-    local palbox_map_object = ""
-    pcall(function()
-        base_container_id = container:GetId()
-        palbox_container = unwrap(storage.TargetContainer)
-        palbox_container_id = palbox_container:GetId()
-        native_base_id = model:GetId()
-    end)
-    palbox_map_object_id, palbox_map_object =
-        pcb_base_palbox_map_object_id(base_id, model)
-    if base_container_id == nil or palbox_container_id == nil or
-        native_base_id == nil or palbox_map_object_id == nil then
-        action_notification(
-            false,
+    local identity = pcb_worker_move_identity(base_id, model, container)
+    if identity == nil then
+        notify(
+            "warning",
             "Companion: roster move failed; base identity unavailable."
         )
         return false, "Base, Palbox, or map-object identity is unavailable.", {}
@@ -5163,42 +5270,29 @@ function pcb_move_pal_roster(command, dry_run)
 
     -- Match the Palbox UI's authoritative move operation. Swapping with an
     -- empty slot updates storage but bypasses the worker spawn lifecycle.
-    local request_method = ""
-    local request_ok = false
-    local request_error = ""
-    if direction == "to_base" then
-        request_ok, request_error = pcall(function()
-            base_network:RequestMoveCharacterToWorker_ToServer(
-                native_base_id,
-                source_slot_id,
-                base_container_id,
-                palbox_map_object_id
-            )
-        end)
-        request_method =
-            "RequestMoveCharacterToWorker_ToServer"
+    local to_base = direction == "to_base"
+    local request_method = to_base and
+        "RequestMoveCharacterToWorker_ToServer" or
+        "RequestMoveWorkerToPalBox_ToServer"
+    local request_ok, request_error
+    if to_base then
+        request_ok, request_error =
+            pcb_request_worker_deploy(identity, source_slot_id)
     else
-        request_ok, request_error = pcall(function()
-            base_network:RequestMoveWorkerToPalBox_ToServer(
-                native_base_id,
-                source_slot_id,
-                target.page,
-                palbox_map_object_id
-            )
-        end)
-        request_method =
-            "RequestMoveWorkerToPalBox_ToServer"
+        request_ok, request_error = pcb_request_worker_withdraw(
+            identity,
+            source_slot_id,
+            target.page
+        )
     end
     local target_pal_id = pcb_slot_identity(target.slot)
-    local source_pal_id = pcb_slot_identity(source.slot)
-    local verified = request_ok and
-        target_pal_id == pal_id and source_pal_id ~= pal_id
-    if verified then
-        local text = direction == "to_base" and
+    if request_ok and
+        pcb_move_verified(source.slot, target.slot, pal_id) then
+        local text = to_base and
             "Companion: moved Pal into " .. base_label .. "'s roster." or
             "Companion: moved Pal from " .. base_label .. " to the Palbox."
         local displayed, notification_error =
-            action_notification(true, text)
+            notify("normal", text)
         return true, "Roster move applied and verified.", {
             data_base_id = base_id,
             data_direction = direction,
@@ -5206,7 +5300,7 @@ function pcb_move_pal_roster(command, dry_run)
                 displayed and "true" or "false",
             data_notification_error = notification_error or "",
             data_pal_id = pal_id,
-            data_palbox_map_object = palbox_map_object,
+            data_palbox_map_object = identity.palbox_map_object,
             data_request_method = request_method,
             data_source = source_location,
             data_target = target_location,
@@ -5217,31 +5311,25 @@ function pcb_move_pal_roster(command, dry_run)
     local rollback_ok = false
     local rollback_error = ""
     if target_pal_id == pal_id then
-        local ok, error_value = pcall(function()
-            if direction == "to_base" then
-                base_network:RequestMoveWorkerToPalBox_ToServer(
-                    native_base_id,
-                    target_slot_id,
-                    source.page,
-                    palbox_map_object_id
-                )
-            else
-                base_network:RequestMoveCharacterToWorker_ToServer(
-                    native_base_id,
-                    target_slot_id,
-                    base_container_id,
-                    palbox_map_object_id
-                )
-            end
-        end)
+        local ok, error_value
+        if to_base then
+            ok, error_value = pcb_request_worker_withdraw(
+                identity,
+                target_slot_id,
+                source.page
+            )
+        else
+            ok, error_value =
+                pcb_request_worker_deploy(identity, target_slot_id)
+        end
         rollback_ok = ok and
             pcb_slot_identity(source.slot) == pal_id
         if not ok then
             rollback_error = tostring(error_value)
         end
     end
-    action_notification(
-        false,
+    notify(
+        "warning",
         rollback_ok and
             "Companion: roster move failed; previous roster restored." or
             "Companion: roster move failed; rollback could not be verified."
@@ -5884,38 +5972,7 @@ local function refresh_bridge_readiness()
             full_name(raid_context.phase_state)
         raid_detection_state.state_machine =
             full_name(raid_context.state_machine)
-        if raid_manager.mode ~= "off" then
-            raid_manager.raid_phase_state =
-                raid_detection_state.phase_state
-            local phase_is_battle = string.find(
-                raid_detection_state.phase_state,
-                "PalRaidBossAreaPhaseBattleState",
-                1,
-                true
-            ) ~= nil
-            if phase_is_battle then
-                raid_manager.raid_phase_seen_battle = true
-                raid_manager.raid_phase_missing_samples = 0
-            elseif is_valid(instance) and
-                is_valid(raid_context.phase_state) then
-                raid_manager.raid_phase_missing_samples = 0
-                if raid_manager.raid_phase_seen_battle then
-                    pcb_stop_raid_manager(
-                        "raid battle phase ended",
-                        true
-                    )
-                end
-            elseif raid_manager.raid_phase_seen_battle then
-                raid_manager.raid_phase_missing_samples =
-                    raid_manager.raid_phase_missing_samples + 1
-                if raid_manager.raid_phase_missing_samples >= 2 then
-                    pcb_stop_raid_manager(
-                        "raid instance disappeared after battle",
-                        true
-                    )
-                end
-            end
-        end
+        pcb_observe_raid_phase(instance, raid_context)
     end
     if not bridge_readiness.game_ready then
         scheduler_metrics.readiness_failures =
@@ -6033,6 +6090,10 @@ local function write_heartbeat()
             tostring(scheduler_metrics.reinforcement_event_requests),
         scheduler_reinforcement_integrity_passes =
             tostring(scheduler_metrics.reinforcement_integrity_passes),
+        scheduler_reinforcement_integrity_effective =
+            tostring(scheduler_metrics.reinforcement_integrity_effective),
+        scheduler_last_queue_build_ms =
+            tostring(scheduler_metrics.last_queue_build_ms),
         scheduler_reinforcement_hooks_installed =
             tostring(scheduler_metrics.reinforcement_hooks_installed),
         scheduler_roster_scans =

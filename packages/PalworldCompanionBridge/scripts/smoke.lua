@@ -116,6 +116,13 @@ local function expect(name, request, assertions)
     assertions(response, name)
 end
 
+local MANAGER_STATES = {
+    ["off"] = true,
+    ["deploying"] = true,
+    ["active"] = true,
+    ["waiting_for_reserves"] = true,
+}
+
 expect(
     "get_raid_state default",
     {
@@ -135,6 +142,11 @@ expect(
         check(
             response.data_reserves_live ~= nil,
             name .. " did not report its reserve source"
+        )
+        check(
+            MANAGER_STATES[response.data_manager_status or ""] == true,
+            name .. " reported an unknown manager state: " ..
+                tostring(response.data_manager_status)
         )
     end
 )
@@ -190,6 +202,10 @@ expect(
     },
     function(response, name)
         check(response.success == "true", name .. " did not succeed")
+        check(
+            response.data_mode == "off",
+            name .. " did not report the stopped mode"
+        )
     end
 )
 
@@ -221,6 +237,8 @@ if heartbeat_file ~= nil then
         "raid_manager_mode=",
         "readiness_controller_available=",
         "scheduler_wakeups=",
+        "scheduler_last_queue_build_ms=",
+        "scheduler_reinforcement_integrity_effective=",
     }) do
         check(
             string.find(heartbeat, field, 1, true) ~= nil,

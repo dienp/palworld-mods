@@ -52,7 +52,10 @@ persistent local override.
 
 - Two-second live heartbeat backed by a cached 10-second readiness probe
 - Scheduler telemetry for mailbox probes, readiness refreshes, reinforcement
-  events, roster/Palbox scans, and pass duration
+  events, roster/Palbox scans, pass duration, and queue-build duration
+- Missed-event telemetry: `scheduler_reinforcement_integrity_effective` counts
+  periodic passes that found work the event hooks did not request, which is the
+  evidence that gates removing the one-minute reconciliation fallback
 - Local-controller selection that excludes remote listen-server controllers
 - Geometric current-base detection through the local view-target position and
   `PalBaseCampManager.GetInRangedBaseCamp`, including other guilds' bases
@@ -80,7 +83,12 @@ persistent local override.
 - Optional `include_probe=true` reflection dumps for the raid area, raid
   metadata, Palbox metadata, and fighter combat surfaces
 - Observe-only and automatic Raid Manager sessions bound to the current owned
-  base, with immediate empty-slot filling and event-triggered reinforcement
+  base, with immediate empty-slot filling and event-triggered reinforcement.
+  The manager reports one of four states: `off`, `deploying`, `active`, or
+  `waiting_for_reserves`
+- One roster-write budget per reinforcement pass covering both replacements and
+  deployments, so a wipe drains over successive passes instead of asking the
+  game to reconcile every downed slot in one frame
 - Coalesced container-swap, worker-roster, and supported downed-state event
   requests, with one shared 60-second queue-refresh/integrity reconciliation
 - Atomic same-slot replacement of a downed base Pal with the highest-level

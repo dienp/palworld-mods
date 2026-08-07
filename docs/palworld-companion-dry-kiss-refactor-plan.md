@@ -1,8 +1,9 @@
 # Palworld Companion Bridge DRY/KISS refactor plan
 
-Status: Stages 1 and 2 are implemented as a source-only change in
-`0.1.0-dev.112`. Stages 3 to 6 are still planned. Nothing has been installed
-or hot reloaded.
+Status: Stages 1 to 5 are implemented as a source-only change, and Stage 6 is
+complete except for the checks that need Windows or a running game. Stages 1
+and 2 landed in `0.1.0-dev.112`; Stages 3 to 5 landed in `0.1.0-dev.113`.
+Nothing has been installed or hot reloaded.
 
 Last updated: 2026-08-07
 
@@ -94,7 +95,8 @@ load-order, nil-call, and protocol regressions on any platform.
 
 ## Stage 2: remove shadowed legacy code (implemented)
 
-`main.lua` went from 8,228 to 6,423 lines.
+`main.lua` went from 8,228 to 6,423 lines here, and 6,484 after Stages 3 to 5
+added the shared primitives back.
 
 - Removed the shadowed first definitions of `pcb_get_raid_state`,
   `pcb_set_raid_manager`, `pcb_stop_raid_manager`, and
@@ -137,85 +139,106 @@ same code:
   happens only when the manager is off or `include_reserves` is requested.
   `data_reserves_live` reports which source answered.
 
-## Stage 3: consolidate small primitives
+## Stage 3: consolidate small primitives (implemented)
 
-Create one small helper for each responsibility:
+One helper per responsibility, each with a single authoritative call site:
 
-- Reset Raid Manager state.
-- Sample raid phase.
-- Resolve worker-move identities.
-- Deploy a worker.
-- Withdraw a worker.
-- Verify a roster move.
-- Roll back a failed move.
-- Validate a reserve candidate.
-- Display a notification with an explicit severity.
+| Responsibility | Helper |
+| --- | --- |
+| Reset Raid Manager state | `pcb_reset_raid_manager_state` |
+| Sample raid phase | `pcb_observe_raid_phase` |
+| Resolve worker-move identities | `pcb_worker_move_identity` |
+| Deploy a worker | `pcb_request_worker_deploy` |
+| Withdraw a worker | `pcb_request_worker_withdraw` |
+| Verify a roster move | `pcb_move_verified` |
+| Locate a Palbox slot | `pcb_resolve_palbox_slot` |
+| Validate a reserve candidate | `pcb_reserve_rejection` |
+| Count invalidated reserves | `pcb_recount_invalidated_reserves` |
+| Notify with an explicit severity | `notify` |
 
-Avoid boolean APIs whose meaning is unclear. For example, replace
-`action_notification(false, text)` with explicit normal, warning, or persistent
-severity.
+`action_notification(success, text)` is replaced by `notify(severity, text)`
+with named `normal`, `warning`, and `persistent` severities mapping to the Pal
+log's 1-3 priority. The numeric priorities each call site produces are
+unchanged.
 
-## Stage 4: simplify Raid Manager
+`pcb_stop_raid_manager` moved above `pcb_swap_raid_pal` so the failed
+replacement path can call it. That path previously set `mode` and
+`stopped_reason` by hand because the function was declared later in the file,
+which left the reserve queue, timers, event flags, and `manager_state` behind
+and skipped the player notification. It now goes through the one reset.
 
-Use one state machine with only these states:
+Deployment, replacement, and the manual roster move had three separate copies
+of identity resolution, the two worker RPCs, verification, and rollback. They
+now share the primitives above. Three copies of "check the Palbox slot the Pal
+was last seen in, else scan every page" became one.
 
-- `off`
-- `deploying`
-- `active`
-- `waiting_for_reserves`
+## Stage 4: simplify Raid Manager (implemented)
 
-Handle only these events:
+`manager_state` now takes exactly the four documented values, defined once as
+`MANAGER_STATE_OFF`, `MANAGER_STATE_DEPLOYING`, `MANAGER_STATE_ACTIVE`, and
+`MANAGER_STATE_WAITING`. The previous ad-hoc strings `observing`,
+`waiting_for_healthy_reserves`, and `""` are gone; `mode` already records
+whether the player asked for observe or auto, so a running observer is simply
+`active`. `deploying` is now reported while a paced batch is still in flight,
+which nothing expressed before.
 
-- Activation.
-- Deployment continuation.
-- Worker downed.
-- Integrity check.
-- Queue exhausted.
-- Battle ended.
-- Watchdog timeout.
+Battle completion stays transition-based and is unchanged in behavior: a
+positively observed Battle phase arms the latch, a later valid non-Battle phase
+stops the manager, two consecutive missing instance samples after Battle are
+the guarded fallback, and the 15-minute watchdog is the last resort. That logic
+moved out of `refresh_bridge_readiness` into `pcb_observe_raid_phase` so the
+readiness refresh does one job.
 
-Keep battle completion transition-based:
+## Stage 5: isolate performance-sensitive work (implemented)
 
-- A positively observed Battle phase arms the battle latch.
-- A subsequent valid non-Battle phase stops Raid Manager.
-- Two missing raid-instance samples after Battle are the guarded fallback.
-- The 15-minute watchdog remains the final fallback.
-
-## Stage 5: isolate performance-sensitive work
-
-- Budget at most one worker deployment per dispatcher pass.
-- Pace bulk deployments without adding a scheduler loop.
-- Do not scan fighter health while filling empty slots.
-- Use lightweight downed checks for deployed workers.
-- Cache ranked reserve metadata.
-- Rebuild the reserve queue only when exhausted or genuinely stale.
-- Keep expensive diagnostics command-driven.
-- Record pass duration and queue-build duration in heartbeat telemetry.
-
-Initial performance gates:
-
-- No multi-second non-spawn reinforcement pass.
-- No full Palbox health profile during each deployment continuation.
-- No repeated global object scan for each Pal in the same operation.
-- No repeated notification for each bulk-deployment step.
-- Activation must return without waiting for all 33 actors to spawn.
+- One roster-write budget covers the whole reinforcement pass, replacements
+  included. Replacements were previously unbounded: a wipe could ask the game
+  to reconcile every downed slot in a single dispatcher pass. Leftover work
+  continues through the existing coalesced request, so no loop or timer was
+  added.
+- Empty-slot filling still does not scan fighter health, deployed-worker checks
+  still use the lightweight downed probe, and the ranked reserve queue is still
+  rebuilt only when exhausted or stale.
+- Queue-build duration joins pass duration in heartbeat telemetry as
+  `scheduler_last_queue_build_ms`.
+- `get_raid_state` no longer forces a Palbox scan (see Stage 2).
 
 ## Stage 6: regression and live verification
 
-Required invariants:
+Verified offline:
 
-- `npm run validate` passes.
-- All existing MCP tests pass.
-- There is one definition per authoritative operation.
-- No new recurring loop or timer exists.
-- PalCom interception remains private.
+| Invariant | Result |
+| --- | --- |
+| `npm run validate` passes | Pass, including the new Stage 1 guards |
+| One definition per authoritative operation | Pass, enforced by the validator |
+| No unreferenced local functions | Pass, enforced by the validator |
+| No write-only Raid Manager state | Pass |
+| No new recurring loop or timer exists | Pass; the mod still registers exactly one `LoopAsync` |
+| Chunk compiles | Pass, `luac -p` |
+| Load, command, and scheduler paths run | Pass, `scripts/smoke.lua` |
+| PalCom interception remains private | Unchanged by this refactor |
+| Hot reload generation guards | Unchanged by this refactor |
+| MCP protocol fields | No field any MCP call reads was removed; the C# side is untouched |
+
+Blocked here, not skipped:
+
+- **The MCP test suite could not be run.** `PalworldMcpServer` targets
+  `net9.0-windows10.0.17763.0`, so it neither builds nor runs off Windows. The
+  refactor changes no C# and removes no field the server reads, but the suite
+  still needs one run on Windows before this is called done.
+
+Still requires a live game:
+
 - Manual Palbox-to-base moves visibly spawn workers.
 - Base-to-Palbox moves visibly withdraw workers.
-- Bulk deployment remains paced.
-- Downed replacement remains event-driven.
+- Bulk deployment remains paced, now including replacements under the shared
+  write budget.
+- Downed replacement remains event-driven, and a multi-Pal wipe drains over
+  successive passes instead of one frame.
 - `Battle -> Result` and `Battle -> Ready` stop Raid Manager.
 - Idempotency and rollback remain intact.
-- Hot reload generation guards still suppress stale loops and hooks.
+- `get_raid_state` reports `data_reserves_live=false` with a correct queue
+  while the manager runs, and `true` when it is off.
 
 ## Delivery policy
 

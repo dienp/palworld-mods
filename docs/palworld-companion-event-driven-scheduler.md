@@ -1,6 +1,8 @@
 # Palworld Companion event-driven scheduler
 
 Status: implemented in Companion Bridge `0.1.0-dev.88`, except native IPC
+(step 5, deferred) and fallback removal (step 6, gated on the telemetry added
+in `0.1.0-dev.113`)
 
 ## Goal
 
@@ -61,6 +63,32 @@ not expose a non-blocking named-pipe primitive, and using `io.open` against a
 Windows named pipe can block the game thread. A future native bridge must
 enqueue notifications for consumption on the game thread; it must not execute
 Unreal reads or writes from its I/O thread.
+
+This is step 5 of the implementation sequence and it cannot be done in Lua. It
+needs a native Windows component built and tested against the target UE4SS
+release, so it stays deferred rather than partially attempted.
+
+## Removing the periodic fallbacks (step 6)
+
+Step 6 is gated on evidence, not on more code: the fallbacks stay until missed
+event telemetry shows the hooks are reliable across loading, replication, and
+hot reload. The measurement that was missing is now collected.
+
+`scheduler_reinforcement_integrity_effective` counts periodic passes that
+actually had reinforcement work to do. Every one of those is work the event
+hooks did not request, so it is the direct miss count for the hooks:
+
+- `scheduler_reinforcement_integrity_passes` — periodic passes that ran.
+- `scheduler_reinforcement_integrity_effective` — of those, how many found
+  work. A sustained zero across raids, base loads, and hot reloads is the
+  evidence that the one-minute reconciliation can go.
+- `scheduler_reinforcement_event_requests` / `_coalesced` / `_passes` — what
+  the hooks did request in the same window.
+- `scheduler_last_queue_build_ms` and `scheduler_last_reinforcement_pass_ms` —
+  the cost of each, so the fallback's price is visible alongside its value.
+
+Do not remove the fallback on a single session's numbers. It needs several
+raids, at least one hot reload, and at least one base stream-out and back.
 
 ## PalCom broker implementation
 

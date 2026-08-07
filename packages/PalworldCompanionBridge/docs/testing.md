@@ -101,6 +101,20 @@
   bridge changes before entering the encounter; no hot reload is permitted
   while a raid is active.
 
+- `0.1.0-dev.113` is the refactor plan's Stage 3 to Stage 5 build, also
+  source-only and unverified in game. Same offline checks pass. Two behavior
+  changes need live confirmation beyond the dev.112 list. First, one roster-write
+  budget now covers replacements as well as deployments: a multi-Pal wipe should
+  drain over successive passes with `data_manager_status=deploying` between
+  them, rather than replacing every downed fighter in one frame, and it must
+  still finish without waiting for the 60-second integrity pass. Second, a
+  failed replacement now stops the manager through the full reset, so
+  `get_raid_state` should report `mode=off` with `manager_status=off` and an
+  in-game stop notification, where it previously left stale reserves and
+  timers behind. Also confirm the four manager states are the only ones
+  reported, and watch `scheduler_reinforcement_integrity_effective`: it counts
+  periodic passes that found work the event hooks missed, and a sustained zero
+  is what gates removing the fallback.
 - `0.1.0-dev.112` is the DRY/KISS refactor plan's Stage 1 and Stage 2 build.
   It is source-only and unverified in game. Offline checks passed: `luac -p`
   compiles the chunk, `npm run validate` accepts the payload and its new
