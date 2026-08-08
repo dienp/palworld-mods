@@ -20,18 +20,36 @@ The modifier applies to 100% of eligible salvage attempts. Each attempt costs
 two magnets in total (one vanilla plus one Deep Salvage cost) and receives +100% of the
 estimated base reward quantity while preserving any active Jellroy bonus.
 
-Production build `1.0.2` uses the 100% modifier chance with runtime
+Production build `1.0.3` uses the 100% modifier chance with runtime
 diagnostics disabled.
+
+## Notification delivery
+
+The activation notification belongs to the player whose salvage attempt was
+selected, not to whoever runs the server.
+
+- The salvaging player's controller is resolved from the authoritative attempt.
+- A listen-server host sees the notification only for their own attempts.
+- A server-only mod cannot draw on an unmodded remote client's HUD.
+  `PalLogManager` exists once per process, so the host's log manager is the
+  host's own HUD. Remote clients are reachable only through a replicated
+  chat message.
+- `remote_notification_via_chat` enables that replicated delivery. It is
+  disabled by default because `remote_notification_chat_category` must be
+  validated against the live chat enum first. With it disabled, a remote
+  player's attempt produces no notification anywhere.
 
 ## Safety
 
 - No native DLL or cooked asset is distributed.
 - No interaction-interface hooks are registered.
 - Deep Salvage consumes exactly one additional rank-matched Fishing Magnet.
-- No chat or RPC control protocol is used.
+- No chat or RPC control protocol is used. The default build sends no chat
+  message; the opt-in remote notification is one outbound whisper to the
+  salvaging player and accepts no inbound commands.
 - Clients do not install the mod.
-- No UI is changed except one notification when a Deep Salvage attempt
-  successfully activates.
+- No UI is changed except one notification to the salvaging player when a Deep
+  Salvage attempt successfully activates.
 - Reward changes are limited to fishing-junk salvage models identified by
   their runtime object or owner name.
 - The modifier fails closed without consuming anything unless the player has

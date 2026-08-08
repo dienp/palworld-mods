@@ -1,5 +1,5 @@
 local MOD_NAME = "DeepSalvage"
-local MOD_VERSION = "1.0.2"
+local MOD_VERSION = "1.0.3"
 
 local CONFIG = {
     modifier_chance = 1.0,
@@ -12,6 +12,14 @@ local CONFIG = {
     debug_notifications = false,
     debug_console = false,
     deep_salvage_notification = true,
+    -- A server-only mod can only draw on the machine it runs on. The Deep
+    -- Salvage notification therefore goes to the local log manager only when
+    -- the salvaging player is the listen-server host. Remote clients are
+    -- reachable exclusively through a replicated chat message, which is
+    -- opt-in because it must be validated against the live chat enum.
+    remote_notification_via_chat = false,
+    remote_notification_chat_category = 4,
+    remote_notification_sender = "Deep Salvage",
     notification_cooldown_ms = 2000,
 }
 
@@ -149,6 +157,22 @@ local function notification_priority(level)
     return 1
 end
 
+-- Writes to the log manager owned by the machine running this script. On a
+-- listen server that is the host's own HUD, never a remote client's.
+local function display_local_notification(priority, message)
+    local displayed = false
+    pcall(function()
+        if not is_valid(cached_log_manager) then
+            cached_log_manager = FindFirstOf("PalLogManager")
+        end
+        if is_valid(cached_log_manager) then
+            cached_log_manager:AddLog(priority, FText(message), {})
+            displayed = true
+        end
+    end)
+    return displayed
+end
+
 local function notify_debug(level, event, fields)
     if not CONFIG.debug_enabled or not CONFIG.debug_notifications then
         return
@@ -178,40 +202,13 @@ local function notify_debug(level, event, fields)
         end
     end
 
-    pcall(function()
-        if not is_valid(cached_log_manager) then
-            cached_log_manager = FindFirstOf("PalLogManager")
-        end
-        if is_valid(cached_log_manager) then
-            cached_log_manager:AddLog(
-                notification_priority(level),
-                FText(table.concat(summary, " | ")),
-                {}
-            )
-            last_notification_by_event[key] = current_ms
-        end
-    end)
-end
-
-local function notify_deep_salvage()
-    if not CONFIG.deep_salvage_notification then
-        return
+    -- Diagnostics stay on the machine running the server by design.
+    if display_local_notification(
+        notification_priority(level),
+        table.concat(summary, " | ")
+    ) then
+        last_notification_by_event[key] = current_ms
     end
-    pcall(function()
-        if not is_valid(cached_log_manager) then
-            cached_log_manager = FindFirstOf("PalLogManager")
-        end
-        if is_valid(cached_log_manager) then
-            cached_log_manager:AddLog(
-                2,
-                FText(
-                    "[Deep Salvage] Extra Fishing Magnet consumed; " ..
-                    "enhanced rewards active."
-                ),
-                {}
-            )
-        end
-    end)
 end
 
 local function log(level, event, fields)
@@ -270,6 +267,158 @@ local function find_controller_by_player_id(player_id)
         end
     end
     return nil
+end
+
+local DEEP_SALVAGE_MESSAGE =
+    "[Deep Salvage] Extra Fishing Magnet consumed; enhanced rewards active."
+
+-- True only for the player sharing the process with this script, which is the
+-- listen-server host. Every other salvaging player is a remote client.
+local function is_local_controller(controller)
+    controller = unwrap(controller)
+    if not is_valid(controller) then
+        return false
+    end
+    for _, accessor in ipairs({
+        "IsLocalController",
+        "IsLocalPlayerController",
+    }) do
+        local ok, value = pcall(function()
+            return unwrap(controller[accessor](controller))
+        end)
+        if ok and value == true then
+            return true
+        end
+    end
+    return false
+end
+
+local function attempt_controller(attempt)
+    if attempt == nil then
+        return nil
+    end
+    local controller = unwrap(attempt.controller)
+    if is_valid(controller) then
+        return controller
+    end
+    local player_id = tonumber(attempt.player_id)
+    if player_id == nil then
+        return nil
+    end
+    controller = find_controller_by_player_id(player_id)
+    if is_valid(controller) then
+        attempt.controller = controller
+        return controller
+    end
+    return nil
+end
+
+local function player_unique_id(controller)
+    local state = nil
+    pcall(function()
+        state = unwrap(controller:GetPalPlayerState())
+    end)
+    if not is_valid(state) then
+        return nil
+    end
+    local raw = nil
+    pcall(function()
+        raw = unwrap(state:GetPlayerUId())
+    end)
+    if raw == nil then
+        pcall(function()
+            raw = unwrap(state.PlayerUId)
+        end)
+    end
+    if raw == nil then
+        return nil
+    end
+    local unique_id = {}
+    for _, part in ipairs({"A", "B", "C", "D"}) do
+        local value = nil
+        pcall(function()
+            value = tonumber(unwrap(raw[part]))
+        end)
+        if value == nil then
+            return nil
+        end
+        unique_id[part] = value
+    end
+    return unique_id
+end
+
+-- Optional replicated delivery for players who are not the host. It fails
+-- closed: without a resolved receiver the message is dropped instead of being
+-- broadcast to everyone.
+local function send_remote_chat_notification(controller, message)
+    local receiver = player_unique_id(controller)
+    if receiver == nil then
+        return false, "receiver-uid-unresolved"
+    end
+    local game_state = nil
+    pcall(function()
+        game_state = FindFirstOf("PalGameStateInGame")
+    end)
+    if not is_valid(game_state) then
+        return false, "game-state-unavailable"
+    end
+    local ok, call_error = pcall(function()
+        game_state:BroadcastChatMessage({
+            Category = CONFIG.remote_notification_chat_category,
+            Sender = CONFIG.remote_notification_sender,
+            SenderPlayerUId = {A = 0, B = 0, C = 0, D = 0},
+            Message = message,
+            ReceiverPlayerUId = receiver,
+        })
+    end)
+    if not ok then
+        return false, "chat-call-failed:" .. tostring(call_error)
+    end
+    return true, ""
+end
+
+local function notify_deep_salvage(attempt)
+    if not CONFIG.deep_salvage_notification then
+        return
+    end
+    local player_id = attempt ~= nil and attempt.player_id or "unknown"
+    local controller = attempt_controller(attempt)
+    if not is_valid(controller) then
+        log("WARN", "deep_salvage_notification", {
+            player_id = player_id,
+            delivered = false,
+            reason = "controller-unresolved",
+        })
+        return
+    end
+    if is_local_controller(controller) then
+        local displayed =
+            display_local_notification(2, DEEP_SALVAGE_MESSAGE)
+        log(displayed and "INFO" or "WARN", "deep_salvage_notification", {
+            player_id = player_id,
+            target = "host",
+            delivered = displayed,
+            reason = displayed and "" or "log-manager-unavailable",
+        })
+        return
+    end
+    if not CONFIG.remote_notification_via_chat then
+        log("INFO", "deep_salvage_notification", {
+            player_id = player_id,
+            target = "remote",
+            delivered = false,
+            reason = "remote-chat-disabled",
+        })
+        return
+    end
+    local sent, reason =
+        send_remote_chat_notification(controller, DEEP_SALVAGE_MESSAGE)
+    log(sent and "INFO" or "WARN", "deep_salvage_notification", {
+        player_id = player_id,
+        target = "remote",
+        delivered = sent,
+        reason = reason,
+    })
 end
 
 local function get_inventory(controller)
@@ -1080,7 +1229,7 @@ local function on_request_open_post(model, request_player_id)
         reason = attempt.failure_reason or "",
     })
     if modifier_active then
-        notify_deep_salvage()
+        notify_deep_salvage(attempt)
     end
 end
 
@@ -1447,4 +1596,5 @@ log("INFO", "mod_loaded", {
     reward_bonus = CONFIG.reward_bonus,
     deployment = "server-only",
     debug_enabled = CONFIG.debug_enabled,
+    remote_notification_via_chat = CONFIG.remote_notification_via_chat,
 })

@@ -3,7 +3,7 @@
 ## Build
 
 - Game revision: 82182 or newer
-- Build version: `1.0.2`
+- Build version: `1.0.3`
 - Mod type: Lua
 - Deployment: server only; clients must not install the mod
 
@@ -38,6 +38,29 @@ Use a temporary `modifier_chance = 1.0` server configuration:
 
 Repeat with `modifier_chance = 0.0` and confirm only the vanilla single magnet
 is consumed.
+
+## Notification delivery
+
+Run a listen server with the host and at least one remote client, using
+`modifier_chance = 1.0`:
+
+1. Salvage as the host. Confirm the host sees the activation notification and
+   that `event=deep_salvage_notification | target=host | delivered=true` is
+   logged.
+2. Salvage as the remote client with `remote_notification_via_chat = false`.
+   Confirm the host sees no notification and that
+   `event=deep_salvage_notification | target=remote | delivered=false |
+   reason=remote-chat-disabled` is logged.
+3. Confirm the logged `player_id` matches the salvaging player in both cases.
+
+Repeat step 2 with `remote_notification_via_chat = true`:
+
+1. Confirm `delivered=true`.
+2. Confirm the salvaging client receives the message.
+3. Confirm no other player and no global channel receives it. A message that
+   reaches everyone means `remote_notification_chat_category` does not select
+   the whisper category on this game revision; restore the default and leave
+   `remote_notification_via_chat` disabled until the correct value is known.
 
 ## Reward roll
 
