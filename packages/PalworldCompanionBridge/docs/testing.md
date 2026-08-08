@@ -101,6 +101,35 @@
   bridge changes before entering the encounter; no hot reload is permitted
   while a raid is active.
 
+- `0.1.0-dev.113` is the refactor plan's Stage 3 to Stage 5 build, also
+  source-only and unverified in game. Same offline checks pass. Two behavior
+  changes need live confirmation beyond the dev.112 list. First, one roster-write
+  budget now covers replacements as well as deployments: a multi-Pal wipe should
+  drain over successive passes with `data_manager_status=deploying` between
+  them, rather than replacing every downed fighter in one frame, and it must
+  still finish without waiting for the 60-second integrity pass. Second, a
+  failed replacement now stops the manager through the full reset, so
+  `get_raid_state` should report `mode=off` with `manager_status=off` and an
+  in-game stop notification, where it previously left stale reserves and
+  timers behind. Also confirm the four manager states are the only ones
+  reported, and watch `scheduler_reinforcement_integrity_effective`: it counts
+  periodic passes that found work the event hooks missed, and a sustained zero
+  is what gates removing the fallback.
+- `0.1.0-dev.112` is the DRY/KISS refactor plan's Stage 1 and Stage 2 build.
+  It is source-only and unverified in game. Offline checks passed: `luac -p`
+  compiles the chunk, `npm run validate` accepts the payload and its new
+  duplicate-definition and unreferenced-local guards, and
+  `packages/PalworldCompanionBridge/scripts/smoke.lua` loads the mod with the
+  UE4SS globals stubbed, drives `get_raid_state` with and without the probe
+  and reserve flags, exercises `set_raid_manager` gating, and writes a
+  heartbeat without raising. In-game verification still required:
+  Palbox-to-base and base-to-Palbox moves visibly spawn and withdraw workers;
+  bulk deployment stays paced; downed replacement stays event-driven;
+  `Battle -> Result` and `Battle -> Ready` stop Raid Manager; and
+  `get_raid_state` reports `data_reserves_live=false` with a correct queue
+  while the manager runs, `true` when it is off. Do not hot reload during an
+  active Raid Area encounter.
+
 Hot reload of `0.1.0-dev.39` succeeded in a loaded world. Heartbeat reported
   `0.1.0-dev.39`, edit mode was enabled by default, and the read-only inventory
   scan discovered 6 containers / 308 slots through

@@ -4,8 +4,15 @@
   "projectType": "application",
   "root": "packages/PalworldCompanionBridge",
   "targets": {
+    "smoke": {
+      "command": "node ../../scripts/run-lua-smoke.mjs .",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    },
     "validate": {
       "command": "node ../../scripts/validate-mods.mjs .",
+      "dependsOn": ["smoke"],
       "options": {
         "cwd": "{projectRoot}"
       }

@@ -1,5 +1,5 @@
 local MOD_NAME = "PalworldCompanionBridge"
-local MOD_VERSION = "0.1.0-dev.111"
+local MOD_VERSION = "0.1.0-dev.113"
 local PROTOCOL_HEADER = "PALWORLD_COMPANION_BRIDGE/1"
 
 local CONFIG = {
@@ -91,10 +91,15 @@ local scheduler_metrics = {
     reinforcement_event_coalesced = 0,
     reinforcement_event_passes = 0,
     reinforcement_integrity_passes = 0,
+    -- Integrity passes that actually had work to do. Every one of these is
+    -- reinforcement the event hooks failed to request, so this is the
+    -- measurement that gates removing the periodic fallback.
+    reinforcement_integrity_effective = 0,
     reinforcement_hooks_installed = 0,
     roster_scans = 0,
     palbox_scans = 0,
     last_reinforcement_pass_ms = 0,
+    last_queue_build_ms = 0,
     worker_trace_network_moves = 0,
     worker_trace_network_swaps = 0,
     worker_trace_slot_updates = 0,
@@ -109,18 +114,21 @@ local scheduler_metrics = {
     worker_trace_observer_container_slots = 0,
     worker_trace_observer_container_size = 0,
 }
+-- Raid Manager has exactly four states. `mode` is what the player asked for
+-- (off, observe, or auto); `manager_state` is what the manager is doing now.
+local MANAGER_STATE_OFF = "off"
+local MANAGER_STATE_DEPLOYING = "deploying"
+local MANAGER_STATE_ACTIVE = "active"
+local MANAGER_STATE_WAITING = "waiting_for_reserves"
+
 local raid_manager = {
     mode = "off",
     base_id = "",
-    base_name = "",
     stopped_reason = "",
-    fighter_count = 0,
-    reserve_count = 0,
     healthy_palbox_count = 0,
     palbox_occupied_count = 0,
     deployment_capacity = 0,
     deployed_count = 0,
-    auto_deployable_count = 0,
     queue_built_at_ms = 0,
     queue_rebuild_count = 0,
     queue_rebuild_reason = "",
@@ -128,12 +136,10 @@ local raid_manager = {
     invalidated_reserve_count = 0,
     started_at_ms = 0,
     last_check_at_ms = 0,
-    downed_count = 0,
     replacement_count = 0,
     deployment_count = 0,
-    tick_count = 0,
     sequence = 0,
-    manager_state = "",
+    manager_state = MANAGER_STATE_OFF,
     reinforcement_pass_requested = false,
     reinforcement_request_reason = "",
     reinforcement_pass_running = false,
@@ -144,8 +150,6 @@ local raid_manager = {
     zero_healthy_warned = false,
     reserves = {},
 }
-local raid_controller_class_cache = nil
-local raid_fighter_cache = nil
 local base_membership_cache = {
     bases = {},
     built_at_ms = 0,
@@ -511,75 +515,6 @@ local function find_valid_objects(class_names, maximum_count)
     return found
 end
 
-local function relevant_inventory_surface(object)
-    local functions = {}
-    local properties = {}
-    if not is_valid(object) then
-        return functions, properties
-    end
-
-    pcall(function()
-        local function signature(func)
-            local parameters = {}
-            func:ForEachProperty(function(property)
-                if #parameters >= 16 then
-                    return true
-                end
-                table.insert(
-                    parameters,
-                    tostring(property:GetFName():ToString()) .. ":" ..
-                    tostring(property:GetClass():GetFName():ToString())
-                )
-                return nil
-            end)
-            return tostring(func:GetFName():ToString()) ..
-                "(" .. table.concat(parameters, ",") .. ")"
-        end
-
-        local struct = object:GetClass()
-        local depth = 0
-        while is_valid(struct) and depth < 8 and
-            (#functions + #properties) < 160 do
-            struct:ForEachFunction(function(func)
-                if (#functions + #properties) >= 160 then
-                    return true
-                end
-                local name = tostring(func:GetFName():ToString())
-                if string.find(name, "Item", 1, true) or
-                    string.find(name, "Container", 1, true) or
-                    string.find(name, "Chest", 1, true) or
-                    string.find(name, "Storage", 1, true) or
-                    string.find(name, "Inventory", 1, true) or
-                    string.find(name, "BaseCamp", 1, true) or
-                    string.find(name, "Retrieve", 1, true) or
-                    string.find(name, "Access", 1, true) then
-                    table.insert(functions, signature(func))
-                end
-                return nil
-            end)
-            struct:ForEachProperty(function(property)
-                if (#functions + #properties) >= 160 then
-                    return true
-                end
-                local name = tostring(property:GetFName():ToString())
-                if string.find(name, "Item", 1, true) or
-                    string.find(name, "Container", 1, true) or
-                    string.find(name, "Chest", 1, true) or
-                    string.find(name, "Storage", 1, true) or
-                    string.find(name, "Inventory", 1, true) or
-                    string.find(name, "BaseCamp", 1, true) or
-                    string.find(name, "Access", 1, true) then
-                    table.insert(properties, name)
-                end
-                return nil
-            end)
-            struct = struct:GetSuperStruct()
-            depth = depth + 1
-        end
-    end)
-    return functions, properties
-end
-
 local function declared_function_surface(object)
     local functions = {}
     if not is_valid(object) then
@@ -611,385 +546,6 @@ local function declared_function_surface(object)
         end)
     end)
     return functions
-end
-
-local function assignment_surface(object)
-    local functions = {}
-    local properties = {}
-    if not is_valid(object) then
-        return functions, properties
-    end
-    pcall(function()
-        local struct = object:GetClass()
-        local depth = 0
-        while is_valid(struct) and depth < 10 and
-            (#functions + #properties) < 256 do
-            struct:ForEachFunction(function(func)
-                local name = tostring(func:GetFName():ToString())
-                if string.find(name, "Work", 1, true) or
-                    string.find(name, "Assign", 1, true) or
-                    string.find(name, "BaseCamp", 1, true) or
-                    string.find(name, "Individual", 1, true) or
-                    string.find(name, "Character", 1, true) then
-                    local parameters = {}
-                    func:ForEachProperty(function(property)
-                        table.insert(
-                            parameters,
-                            tostring(property:GetFName():ToString()) .. ":" ..
-                            tostring(property:GetClass():GetFName():ToString())
-                        )
-                        return nil
-                    end)
-                    table.insert(
-                        functions,
-                        tostring(struct:GetFName():ToString()) .. "." ..
-                        name .. "(" .. table.concat(parameters, ",") .. ")"
-                    )
-                end
-                return nil
-            end)
-            struct:ForEachProperty(function(property)
-                local name = tostring(property:GetFName():ToString())
-                if string.find(name, "Work", 1, true) or
-                    string.find(name, "Assign", 1, true) or
-                    string.find(name, "BaseCamp", 1, true) or
-                    string.find(name, "Individual", 1, true) or
-                    string.find(name, "Character", 1, true) or
-                    name == "Transform" then
-                    table.insert(
-                        properties,
-                        tostring(struct:GetFName():ToString()) .. "." .. name
-                    )
-                end
-                return nil
-            end)
-            struct = struct:GetSuperStruct()
-            depth = depth + 1
-        end
-    end)
-    return functions, properties
-end
-
-local function legacy_inventory_snapshot()
-    local controller = find_local_controller()
-    local state = nil
-    local inventory = nil
-    local module = nil
-    local container = nil
-    local helper = nil
-    local dispenser = find_first_valid({
-        "PalMapObjectBaseCampItemDispenserModel",
-        "BP_BuildObject_BaseCampItemDispenser_C",
-    })
-    local storage_models = find_valid_objects({
-        "PalMapObjectItemChestModel",
-        "PalMapObjectItemStorageModel",
-        "PalMapObjectSupplyStorageModel",
-    }, 256)
-    local storage_probe = {}
-    local first_storage_model = nil
-    local first_storage_module = nil
-    local first_storage_container = nil
-    for index, storage_model in ipairs(storage_models) do
-        local storage_base = nil
-        local storage_module = nil
-        local storage_container = nil
-        local storage_base_id = ""
-        local storage_container_id = ""
-        pcall(function()
-            storage_base = unwrap(storage_model:GetBaseCampModelBelongTo())
-        end)
-        pcall(function()
-            storage_module = unwrap(storage_model:GetItemContainerModule())
-        end)
-        if is_valid(storage_module) then
-            pcall(function()
-                storage_container = unwrap(storage_module.TargetContainer)
-            end)
-        end
-        pcall(function()
-            storage_base_id =
-                guid_string(storage_model:GetBaseCampIdBelongTo())
-        end)
-        if is_valid(storage_container) then
-            pcall(function()
-                storage_container_id =
-                    guid_string(storage_container:GetContainerId())
-            end)
-        end
-        table.insert(storage_probe, table.concat({
-            tostring(index),
-            full_name(storage_model),
-            full_name(storage_base),
-            storage_base_id,
-            full_name(storage_module),
-            full_name(storage_container),
-            storage_container_id,
-        }, "~"))
-        if first_storage_model == nil and is_valid(storage_container) then
-            first_storage_model = storage_model
-            first_storage_module = storage_module
-            first_storage_container = storage_container
-        end
-    end
-    local dispenser_access = nil
-    local dispenser_chest_access = nil
-    local dispenser_module = nil
-    local dispenser_base_camp = nil
-    if is_valid(dispenser) then
-        pcall(function()
-            dispenser_access = unwrap(dispenser:GetItemContainerAccess())
-        end)
-        pcall(function()
-            dispenser_chest_access =
-                unwrap(dispenser:GetItemChestContainerAccess())
-        end)
-        pcall(function()
-            dispenser_module = unwrap(dispenser:GetItemContainerModule())
-        end)
-        pcall(function()
-            dispenser_base_camp = unwrap(dispenser:GetBaseCampModelBelongTo())
-        end)
-    end
-    if is_valid(controller) then
-        pcall(function()
-            state = unwrap(controller:GetPalPlayerState())
-        end)
-    end
-    if is_valid(state) then
-        pcall(function()
-            inventory = unwrap(state:GetInventoryData())
-        end)
-    end
-    if is_valid(inventory) then
-        pcall(function()
-            helper = unwrap(inventory.InventoryMultiHelper)
-        end)
-        pcall(function()
-            module = unwrap(inventory:GetItemContainerModule())
-        end)
-    end
-    if is_valid(module) then
-        pcall(function()
-            container = unwrap(module.TargetContainer)
-        end)
-    end
-
-    local items = {}
-    local containers = {}
-    local collection_surface = {}
-    local property_surface = {}
-    local seen_containers = {}
-    local slot_count = 0
-    local truncated = false
-
-    local function inspect_container(candidate, label)
-        candidate = unwrap(candidate)
-        if not is_valid(candidate) then
-            return
-        end
-        local candidate_name = full_name(candidate)
-        if seen_containers[candidate_name] then
-            return
-        end
-        local slots_ok, slots = pcall(function()
-            return candidate.ItemSlotArray
-        end)
-        if not slots_ok or slots == nil then
-            return
-        end
-
-        local count_ok, count = pcall(function()
-            return #slots
-        end)
-        if not count_ok then
-            return
-        end
-        seen_containers[candidate_name] = true
-        count = tonumber(count) or 0
-        slot_count = slot_count + count
-        table.insert(
-            containers,
-            tostring(label) .. ":" .. candidate_name .. ":" .. tostring(count)
-        )
-        for index = 1, math.min(
-            count,
-            CONFIG.maximum_inventory_slots_per_container
-        ) do
-            if #items >= CONFIG.maximum_inventory_items then
-                truncated = true
-                break
-            end
-            local slot = unwrap(slots[index])
-            if is_valid(slot) then
-                local item_id = ""
-                local count_value = 0
-                pcall(function()
-                    item_id = name_string(unwrap(slot.ItemId.StaticId))
-                end)
-                pcall(function()
-                    count_value = tonumber(slot.StackCount) or 0
-                end)
-                if item_id ~= "" and count_value > 0 then
-                    table.insert(
-                        items,
-                        tostring(label) .. ":" .. tostring(index) .. ":" ..
-                        item_id .. ":" .. tostring(count_value)
-                    )
-                end
-            end
-        end
-        if count > CONFIG.maximum_inventory_slots_per_container then
-            truncated = true
-        end
-    end
-
-    local function inspect_collection(collection, label)
-        local count_ok, count = pcall(function()
-            return #collection
-        end)
-        if not count_ok then
-            table.insert(collection_surface, label .. "=<unreadable>")
-            return
-        end
-        count = tonumber(count) or 0
-        table.insert(
-            collection_surface,
-            label .. ".count=" .. tostring(count)
-        )
-        for index = 1, math.min(count, 64) do
-            local value_ok, value = pcall(function()
-                return unwrap(collection[index])
-            end)
-            if value_ok then
-                local display = is_valid(value) and
-                    full_name(value) or tostring(value)
-                table.insert(
-                    collection_surface,
-                    label .. "[" .. tostring(index) .. "]=" .. display
-                )
-                inspect_container(
-                    value,
-                    label .. "[" .. tostring(index) .. "]"
-                )
-            end
-        end
-        if count > 64 then
-            truncated = true
-        end
-    end
-
-    inspect_container(container, "module.TargetContainer")
-
-    if is_valid(helper) then
-        pcall(function()
-            inspect_collection(
-                helper.Containers,
-                "InventoryMultiHelper.Containers"
-            )
-        end)
-        pcall(function()
-            local struct = helper:GetClass()
-            local depth = 0
-            local property_count = 0
-            while is_valid(struct) and depth < 8 and property_count < 96 do
-                struct:ForEachProperty(function(property)
-                    if property_count >= 96 then
-                        truncated = true
-                        return true
-                    end
-                    property_count = property_count + 1
-                    local property_name =
-                        tostring(property:GetFName():ToString())
-                    local value_ok, value = pcall(function()
-                        return unwrap(helper:GetPropertyValue(property_name))
-                    end)
-                    local display = "<unreadable>"
-                    if value_ok then
-                        display = is_valid(value) and
-                            full_name(value) or tostring(value)
-                        inspect_container(
-                            value,
-                            "InventoryMultiHelper." .. property_name
-                        )
-                    end
-                    table.insert(
-                        property_surface,
-                        property_name .. "=" .. display
-                    )
-                    return nil
-                end)
-                struct = struct:GetSuperStruct()
-                depth = depth + 1
-            end
-        end)
-    end
-
-    local dispenser_functions, dispenser_properties =
-        relevant_inventory_surface(dispenser)
-    local dispenser_declared_functions =
-        declared_function_surface(dispenser)
-    local access_functions, access_properties =
-        relevant_inventory_surface(dispenser_access)
-    local chest_access_functions, chest_access_properties =
-        relevant_inventory_surface(dispenser_chest_access)
-    local base_camp_functions, base_camp_properties =
-        relevant_inventory_surface(dispenser_base_camp)
-    local storage_model_functions, storage_model_properties =
-        relevant_inventory_surface(first_storage_model)
-    local storage_module_functions, storage_module_properties =
-        relevant_inventory_surface(first_storage_module)
-    local storage_container_functions, storage_container_properties =
-        relevant_inventory_surface(first_storage_container)
-
-    return {
-        data_inventory = full_name(inventory),
-        data_dispenser = full_name(dispenser),
-        data_dispenser_access = full_name(dispenser_access),
-        data_dispenser_access_functions =
-            table.concat(access_functions, "|"),
-        data_dispenser_access_properties =
-            table.concat(access_properties, "|"),
-        data_dispenser_base_camp = full_name(dispenser_base_camp),
-        data_dispenser_base_camp_functions =
-            table.concat(base_camp_functions, "|"),
-        data_dispenser_base_camp_properties =
-            table.concat(base_camp_properties, "|"),
-        data_dispenser_chest_access = full_name(dispenser_chest_access),
-        data_dispenser_chest_access_functions =
-            table.concat(chest_access_functions, "|"),
-        data_dispenser_chest_access_properties =
-            table.concat(chest_access_properties, "|"),
-        data_dispenser_declared_functions =
-            table.concat(dispenser_declared_functions, "|"),
-        data_dispenser_functions = table.concat(dispenser_functions, "|"),
-        data_dispenser_module = full_name(dispenser_module),
-        data_dispenser_properties = table.concat(dispenser_properties, "|"),
-        data_multi_helper = full_name(helper),
-        data_container_module = full_name(module),
-        data_container = full_name(container),
-        data_container_count = tostring(#containers),
-        data_collection_surface = table.concat(collection_surface, "|"),
-        data_containers = table.concat(containers, "|"),
-        data_slot_count = tostring(slot_count),
-        data_items = table.concat(items, "|"),
-        data_storage_model_count = tostring(#storage_models),
-        data_storage_model_functions =
-            table.concat(storage_model_functions, "|"),
-        data_storage_model_properties =
-            table.concat(storage_model_properties, "|"),
-        data_storage_module_functions =
-            table.concat(storage_module_functions, "|"),
-        data_storage_module_properties =
-            table.concat(storage_module_properties, "|"),
-        data_storage_container_functions =
-            table.concat(storage_container_functions, "|"),
-        data_storage_container_properties =
-            table.concat(storage_container_properties, "|"),
-        data_storage_probe = table.concat(storage_probe, "|"),
-        data_property_surface = table.concat(property_surface, "|"),
-        data_truncated = truncated and "true" or "false",
-    }
 end
 
 local function is_zero_guid(value)
@@ -1342,26 +898,6 @@ local function base_model_group_id(model)
                 identifier = guid_string(model.GroupIdBelongTo)
             end)
         end
-    end
-    return is_guid(identifier) and identifier or ""
-end
-
-local function local_player_uid()
-    local controller = find_local_controller()
-    local state = nil
-    local identifier = ""
-    if is_valid(controller) then
-        pcall(function()
-            state = unwrap(controller:GetPalPlayerState())
-        end)
-        pcall(function()
-            identifier = guid_string(controller:GetPlayerUId())
-        end)
-    end
-    if not is_guid(identifier) and is_valid(state) then
-        pcall(function()
-            identifier = guid_string(state.PlayerUId)
-        end)
     end
     return is_guid(identifier) and identifier or ""
 end
@@ -2113,32 +1649,6 @@ local function object_location(object)
     return vector_string(location) ~= "" and location or nil
 end
 
-local function vector_components(vector)
-    if vector == nil then
-        return nil, nil, nil
-    end
-    local x, y, z = nil, nil, nil
-    pcall(function()
-        x = tonumber(unwrap(vector.X))
-        y = tonumber(unwrap(vector.Y))
-        z = tonumber(unwrap(vector.Z))
-    end)
-    return x, y, z
-end
-
-local function distance_squared(left, right)
-    local lx, ly, lz = vector_components(left)
-    local rx, ry, rz = vector_components(right)
-    if lx == nil or ly == nil or lz == nil or
-        rx == nil or ry == nil or rz == nil then
-        return nil
-    end
-    local dx = lx - rx
-    local dy = ly - ry
-    local dz = lz - rz
-    return dx * dx + dy * dy + dz * dz
-end
-
 local function relevant_geometry_surface(label, object)
     local records = {}
     if not is_valid(object) then
@@ -2770,14 +2280,24 @@ local function current_work_matches(parameter, target_work, target_work_id)
     return current_id ~= "" and current_id == target_work_id, current
 end
 
-local function action_notification(success, text)
+-- Notification severity is named rather than a boolean. Palworld's Pal log
+-- takes a 1-3 priority; these are the only three this mod uses.
+local NOTIFICATION_PRIORITY = {
+    normal = 1,
+    warning = 2,
+    persistent = 3,
+}
+
+local function notify(severity, text)
     local clipped = string.sub(
         tostring(text),
         1,
         CONFIG.maximum_message_length
     )
-    local displayed, notification_error =
-        display_notification(clipped, success and 1 or 2)
+    local displayed, notification_error = display_notification(
+        clipped,
+        NOTIFICATION_PRIORITY[severity] or NOTIFICATION_PRIORITY.normal
+    )
     return displayed, notification_error, clipped
 end
 
@@ -2815,14 +2335,14 @@ local function assign_pal_to_station(command, dry_run)
             "Pal is not an active worker at the requested loaded base." or
             "Station is not a loaded work target at the requested base."
         if not dry_run then
-            action_notification(false, "Companion: " .. failure)
+            notify("warning", "Companion: " .. failure)
         end
         return false, failure, {}
     end
     if selected_station.work_id == "" then
         local failure = "Target station has no readable work ID."
         if not dry_run then
-            action_notification(false, "Companion: " .. failure)
+            notify("warning", "Companion: " .. failure)
         end
         return false, failure, {}
     end
@@ -2872,7 +2392,7 @@ local function assign_pal_to_station(command, dry_run)
             " is already assigned to " .. station_label ..
             " at " .. base_label .. "."
         local displayed, notification_error =
-            action_notification(true, text)
+            notify("normal", text)
         return true, "Pal was already fixed to the requested station.", {
             data_already_assigned = "true",
             data_base_id = base_id,
@@ -2911,7 +2431,7 @@ local function assign_pal_to_station(command, dry_run)
         local text = "Companion: assigned " .. pal_label ..
             " to " .. station_label .. " at " .. base_label .. "."
         local displayed, notification_error =
-            action_notification(true, text)
+            notify("normal", text)
         return true, "Pal assignment applied and verified.", {
             data_base_id = base_id,
             data_notification_displayed =
@@ -2961,8 +2481,8 @@ local function assign_pal_to_station(command, dry_run)
     local rollback_text = rollback_attempted and
         (rollback_verified and " Previous assignment restored." or
             " Rollback could not be verified.") or ""
-    local displayed, notification_error = action_notification(
-        false,
+    local displayed, notification_error = notify(
+        "warning",
         "Companion: assignment failed for " .. pal_label ..
             "." .. rollback_text
     )
@@ -2981,273 +2501,6 @@ local function assign_pal_to_station(command, dry_run)
         data_station_id = station_id,
         data_verified = "false",
     }
-end
-
-local function probe_assignment_surface()
-    local controllers = find_valid_objects({
-        "BP_MonsterAIController_BaseCamp_C",
-    }, 128)
-    local works = find_valid_objects({"PalWorkBase"}, 512)
-    local controller = nil
-    local controller_probe = {}
-    for _, candidate in ipairs(controllers) do
-        if not string.find(full_name(candidate), "Default__", 1, true) then
-            local candidate_pawn = nil
-            pcall(function()
-                candidate_pawn = unwrap(candidate:K2_GetPawn())
-            end)
-            if not is_valid(candidate_pawn) then
-                pcall(function()
-                    candidate_pawn = unwrap(candidate:GetPawn())
-                end)
-            end
-            if #controller_probe < 32 then
-                table.insert(
-                    controller_probe,
-                    full_name(candidate) .. "~" .. full_name(candidate_pawn)
-                )
-            end
-            if is_valid(candidate_pawn) then
-                controller = candidate
-                break
-            end
-        end
-    end
-    local first_work = nil
-    for _, candidate in ipairs(works) do
-        if not string.find(full_name(candidate), "Default__", 1, true) then
-            local transform = nil
-            pcall(function()
-                transform = unwrap(candidate.Transform)
-            end)
-            if is_valid(transform) then
-                first_work = candidate
-                break
-            end
-        end
-    end
-    local player_controller = find_local_controller()
-    local dispenser = find_first_valid({
-        "PalMapObjectBaseCampItemDispenserModel",
-    })
-    local base_model = nil
-    if is_valid(dispenser) then
-        pcall(function()
-            base_model = unwrap(dispenser:GetBaseCampModelBelongTo())
-        end)
-    end
-    local pawn = nil
-    local parameter = nil
-    local current_work = nil
-    if is_valid(controller) then
-        pcall(function()
-            pawn = unwrap(controller:K2_GetPawn())
-        end)
-        if not is_valid(pawn) then
-            pcall(function()
-                pawn = unwrap(controller:GetPawn())
-            end)
-        end
-    end
-    if is_valid(pawn) then
-        pcall(function()
-            parameter = unwrap(pawn:GetCharacterParameterComponent())
-        end)
-    end
-    if is_valid(parameter) then
-        pcall(function()
-            current_work = unwrap(parameter:GetWork())
-        end)
-    end
-
-    local controller_functions, controller_properties =
-        assignment_surface(controller)
-    local pawn_functions, pawn_properties = assignment_surface(pawn)
-    local parameter_functions, parameter_properties =
-        assignment_surface(parameter)
-    local probe_individual = individual_parameter(parameter)
-    local individual_functions, individual_properties =
-        assignment_surface(probe_individual)
-    local work_functions, work_properties = assignment_surface(first_work)
-    local current_work_functions, current_work_properties =
-        assignment_surface(current_work)
-    local player_controller_functions, player_controller_properties =
-        assignment_surface(player_controller)
-    local base_functions, base_properties = assignment_surface(base_model)
-    local parameter_base_id = object_base_id(parameter)
-    local base_model_id = object_base_id(base_model)
-    local first_work_base_id = object_base_id(first_work)
-    local first_work_property_id = ""
-    local first_work_getter_id = ""
-    local parameter_getter_id = ""
-    local probe_pal_id, probe_character_id, probe_nickname =
-        worker_identity(parameter)
-    pcall(function()
-        first_work_property_id =
-            guid_string(first_work.BaseCampIdBelongTo)
-    end)
-    pcall(function()
-        first_work_getter_id =
-            guid_string(first_work:GetBaseCampIdBelongTo())
-    end)
-    pcall(function()
-        parameter_getter_id =
-            guid_string(parameter:GetBaseCampId())
-    end)
-    local work_scan = {}
-    local work_base_id_count = 0
-    local work_location_count = 0
-    for _, candidate in ipairs(works) do
-        if not string.find(full_name(candidate), "Default__", 1, true) then
-            local candidate_base_id = object_base_id(candidate)
-            local candidate_location = work_location(candidate)
-            if is_guid(candidate_base_id) then
-                work_base_id_count = work_base_id_count + 1
-            end
-            if candidate_location ~= nil then
-                work_location_count = work_location_count + 1
-            end
-            if #work_scan < 24 then
-                table.insert(work_scan, table.concat({
-                    full_name(candidate),
-                    candidate_base_id,
-                    vector_string(candidate_location),
-                }, "~"))
-            end
-        end
-    end
-
-    return {
-        data_controller_count = tostring(#controllers),
-        data_controller_probe = table.concat(controller_probe, "|"),
-        data_work_count = tostring(#works),
-        data_controller = full_name(controller),
-        data_pawn = full_name(pawn),
-        data_parameter = full_name(parameter),
-        data_parameter_base_id = parameter_base_id,
-        data_parameter_getter_id = parameter_getter_id,
-        data_probe_character_id = probe_character_id,
-        data_probe_nickname = probe_nickname,
-        data_probe_pal_id = probe_pal_id,
-        data_current_work = full_name(current_work),
-        data_first_work = full_name(first_work),
-        data_first_work_base_id = first_work_base_id,
-        data_first_work_getter_id = first_work_getter_id,
-        data_first_work_property_id = first_work_property_id,
-        data_base_model = full_name(base_model),
-        data_base_model_id = base_model_id,
-        data_base_functions = table.concat(base_functions, "|"),
-        data_base_properties = table.concat(base_properties, "|"),
-        data_controller_functions = table.concat(controller_functions, "|"),
-        data_controller_properties = table.concat(controller_properties, "|"),
-        data_pawn_functions = table.concat(pawn_functions, "|"),
-        data_pawn_properties = table.concat(pawn_properties, "|"),
-        data_parameter_functions = table.concat(parameter_functions, "|"),
-        data_parameter_properties = table.concat(parameter_properties, "|"),
-        data_individual = full_name(probe_individual),
-        data_individual_functions =
-            table.concat(individual_functions, "|"),
-        data_individual_properties =
-            table.concat(individual_properties, "|"),
-        data_work_functions = table.concat(work_functions, "|"),
-        data_work_properties = table.concat(work_properties, "|"),
-        data_work_base_id_count = tostring(work_base_id_count),
-        data_work_location_count = tostring(work_location_count),
-        data_work_scan = table.concat(work_scan, "|"),
-        data_player_controller_functions =
-            table.concat(player_controller_functions, "|"),
-        data_player_controller_properties =
-            table.concat(player_controller_properties, "|"),
-        data_current_work_functions =
-            table.concat(current_work_functions, "|"),
-        data_current_work_properties =
-            table.concat(current_work_properties, "|"),
-    }
-end
-
-function probe_roster_surface()
-    local result = {}
-    local components = find_valid_objects({
-        "PalNetworkCharacterContainerComponent",
-    }, 64)
-    result.data_network_component_count = tostring(#components)
-    for index = 1, math.min(#components, 8) do
-        local component = components[index]
-        local functions, properties = assignment_surface(component)
-        local owner = nil
-        pcall(function()
-            owner = unwrap(component:GetOwner())
-        end)
-        result["data_network_component_" .. index] = full_name(component)
-        result["data_network_component_" .. index .. "_functions"] =
-            table.concat(functions, "|")
-        result["data_network_component_" .. index .. "_properties"] =
-            table.concat(properties, "|")
-        result["data_network_component_" .. index .. "_declared"] =
-            table.concat(declared_function_surface(component), "|")
-        result["data_network_component_" .. index .. "_owner"] =
-            full_name(owner)
-        result["data_network_component_" .. index .. "_owner_declared"] =
-            table.concat(declared_function_surface(owner), "|")
-    end
-
-    local director = find_first_valid({"PalBaseCampWorkerDirector"})
-    local director_container = nil
-    pcall(function()
-        director_container = unwrap(director.CharacterContainer)
-    end)
-    local director_functions, director_properties =
-        assignment_surface(director)
-    local container_functions, container_properties =
-        assignment_surface(director_container)
-    result.data_base_director = full_name(director)
-    result.data_base_director_functions =
-        table.concat(director_functions, "|")
-    result.data_base_director_properties =
-        table.concat(director_properties, "|")
-    result.data_director_container = full_name(director_container)
-    result.data_director_container_functions =
-        table.concat(container_functions, "|")
-    result.data_director_container_properties =
-        table.concat(container_properties, "|")
-    result.data_director_container_declared =
-        table.concat(declared_function_surface(director_container), "|")
-
-    local controller = find_local_controller()
-    local state = nil
-    local storage = nil
-    local first_slot = nil
-    pcall(function()
-        state = unwrap(controller:GetPalPlayerState())
-        storage = unwrap(state:GetPalStorage())
-        first_slot = unwrap(storage:GetSlot(0, 0))
-    end)
-    local storage_functions, storage_properties =
-        assignment_surface(storage)
-    local slot_functions, slot_properties =
-        assignment_surface(first_slot)
-    result.data_pal_storage = full_name(storage)
-    result.data_pal_storage_functions =
-        table.concat(storage_functions, "|")
-    result.data_pal_storage_properties =
-        table.concat(storage_properties, "|")
-    result.data_pal_storage_declared =
-        table.concat(declared_function_surface(storage), "|")
-    result.data_first_storage_slot = full_name(first_slot)
-    result.data_storage_slot_functions =
-        table.concat(slot_functions, "|")
-    result.data_storage_slot_properties =
-        table.concat(slot_properties, "|")
-    result.data_storage_slot_declared =
-        table.concat(declared_function_surface(first_slot), "|")
-    local container_manager =
-        find_first_valid({"PalCharacterContainerManager"})
-    result.data_container_manager = full_name(container_manager)
-    result.data_container_manager_declared =
-        table.concat(declared_function_surface(container_manager), "|")
-    result.data_base_director_declared =
-        table.concat(declared_function_surface(director), "|")
-    return result
 end
 
 function pcb_slot_identity(slot)
@@ -3598,37 +2851,6 @@ local function pcb_refresh_base_worker_world(base_id)
     return true, "replication-fallback"
 end
 
-local function pcb_notify_base_worker_slot_changed(
-    director,
-    slot,
-    previous_handle
-)
-    if not is_valid(director) or not is_valid(slot) then
-        return false, "Base worker director or changed slot is unavailable."
-    end
-    local observer = nil
-    pcall(function()
-        observer = unwrap(director.SlotObserverForServer)
-    end)
-    if not is_valid(observer) then
-        pcall(function()
-            observer = unwrap(
-                director:GetPropertyValue("SlotObserverForServer")
-            )
-        end)
-    end
-    if not is_valid(observer) then
-        return false, "Base worker slot observer is unavailable."
-    end
-    local notified, notify_error = pcall(function()
-        observer:OnUpdateSlot(slot, previous_handle)
-    end)
-    if not notified then
-        return false, tostring(notify_error)
-    end
-    return true, "slot-observer"
-end
-
 function pcb_container_slots(container)
     local slots = {}
     if not is_valid(container) then
@@ -3678,6 +2900,22 @@ function pcb_find_palbox_slot(storage, target_pal_id)
         end
     end
     return nil
+end
+
+-- Palbox lookups always know where a Pal was last seen. Check that slot first
+-- and only fall back to the full page scan, which reads up to 30 slots per
+-- page across every page.
+function pcb_resolve_palbox_slot(storage, target_pal_id, page, index)
+    if page ~= nil and index ~= nil then
+        local slot = nil
+        pcall(function()
+            slot = unwrap(storage:GetSlot(page, index))
+        end)
+        if pcb_slot_identity(slot) == target_pal_id then
+            return {index = index, page = page, slot = slot}
+        end
+    end
+    return pcb_find_palbox_slot(storage, target_pal_id)
 end
 
 function pcb_find_empty_palbox_slot(storage)
@@ -3999,40 +3237,6 @@ local function pcb_base_palboxes(base_id)
     return matches
 end
 
-local function pcb_raid_class_candidates()
-    local class_names = {}
-    local seen = {}
-    local ok, classes = pcall(function()
-        return FindObjects(0, "Class", nil, nil, nil, false)
-    end)
-    if not ok or type(classes) ~= "table" then
-        return class_names
-    end
-    for _, class_object in ipairs(classes) do
-        if #class_names >= 96 then
-            break
-        end
-        class_object = unwrap(class_object)
-        if is_valid(class_object) then
-            local name = ""
-            pcall(function()
-                name = tostring(class_object:GetFName():ToString())
-            end)
-            local lowered = string.lower(name)
-            if name ~= "" and
-                (string.find(lowered, "raidboss", 1, true) or
-                    string.find(lowered, "raid_boss", 1, true) or
-                    string.find(lowered, "bossbattle", 1, true)) and
-                not seen[name] then
-                seen[name] = true
-                table.insert(class_names, name)
-            end
-        end
-    end
-    table.sort(class_names)
-    return class_names
-end
-
 local function pcb_raid_area_object_probe()
     local records = {}
     local seen_classes = {}
@@ -4180,128 +3384,6 @@ local function pcb_raid_metadata_surface()
         end
     end
     return records
-end
-
-local function pcb_raid_controller_classes()
-    if raid_controller_class_cache ~= nil then
-        return raid_controller_class_cache
-    end
-    local names = {}
-    local seen = {}
-    local ok, classes = pcall(function()
-        return FindObjects(0, "Class", nil, nil, nil, false)
-    end)
-    if ok and type(classes) == "table" then
-        for _, class_object in ipairs(classes) do
-            if #names >= 128 then
-                break
-            end
-            class_object = unwrap(class_object)
-            if is_valid(class_object) then
-                local name = ""
-                pcall(function()
-                    name =
-                        tostring(class_object:GetFName():ToString())
-                end)
-                local lowered = string.lower(name)
-                if string.find(lowered, "monster", 1, true) and
-                    string.find(lowered, "aicontroller", 1, true) and
-                    not seen[name] then
-                    seen[name] = true
-                    table.insert(names, name)
-                end
-            end
-        end
-    end
-    table.sort(names)
-    raid_controller_class_cache = names
-    return names
-end
-
-local function pcb_collect_raid_fighters(
-    raid_area_base_id,
-    owner_base_id,
-    battle_active
-)
-    if not battle_active then
-        return {}
-    end
-    if raid_fighter_cache ~= nil and
-        raid_fighter_cache.raid_area_base_id == raid_area_base_id and
-        raid_fighter_cache.owner_base_id == owner_base_id then
-        local cached = {}
-        for _, fighter in ipairs(raid_fighter_cache.fighters) do
-            if is_valid(fighter.pawn) and
-                is_valid(fighter.parameter) then
-                table.insert(cached, fighter)
-            end
-        end
-        raid_fighter_cache.fighters = cached
-        return cached
-    end
-
-    local fighters = {}
-    local seen = {}
-    local roster_ids = {}
-    local _, _, owner_container = pcb_base_roster(owner_base_id)
-    for _, entry in ipairs(pcb_container_slots(owner_container)) do
-        local roster_pal_id = pcb_slot_identity(entry.slot)
-        if is_guid(roster_pal_id) then
-            roster_ids[roster_pal_id] = true
-        end
-    end
-    local player_pawn = controller_pawn(find_local_controller())
-    local player_location = object_location(player_pawn)
-    local maximum_distance_squared = 50000 * 50000
-    for _, class_name in ipairs(pcb_raid_controller_classes()) do
-        for _, controller in ipairs(
-            find_valid_objects({class_name}, 128)
-        ) do
-            local pawn = controller_pawn(controller)
-            local parameter = pawn_parameter(pawn)
-            local pal_id, character_id, nickname, individual =
-                worker_identity(parameter)
-            local candidate_base_id = object_base_id(parameter)
-            local pawn_location = object_location(pawn)
-            local distance = distance_squared(
-                player_location,
-                pawn_location
-            )
-            local belongs_to_raid =
-                candidate_base_id ~= "" and
-                (candidate_base_id == raid_area_base_id or
-                    candidate_base_id == owner_base_id)
-            local nearby = distance ~= nil and
-                distance <= maximum_distance_squared
-            if is_guid(pal_id) and roster_ids[pal_id] and
-                belongs_to_raid and nearby and
-                not seen[pal_id] then
-                seen[pal_id] = true
-                table.insert(fighters, {
-                    base_id = candidate_base_id,
-                    character_id = character_id,
-                    controller = controller,
-                    current_station_id = "",
-                    distance_squared = distance,
-                    fixed = false,
-                    individual = individual,
-                    nickname = nickname,
-                    pal_id = pal_id,
-                    parameter = parameter,
-                    pawn = pawn,
-                })
-            end
-        end
-    end
-    table.sort(fighters, function(left, right)
-        return left.pal_id < right.pal_id
-    end)
-    raid_fighter_cache = {
-        fighters = fighters,
-        owner_base_id = owner_base_id,
-        raid_area_base_id = raid_area_base_id,
-    }
-    return fighters
 end
 
 local function pcb_character_container_from_module(module)
@@ -4624,56 +3706,6 @@ function pcb_raid_area_roster(base_id)
     }
 end
 
-local function pcb_raid_objects(include_probe)
-    local records = {}
-    local active_object = nil
-    local active_source = ""
-    local class_names = {
-        "PalNetworkRaidBossComponent",
-        "PalMapObjectRaidBossSummonParameterComponent",
-    }
-    if include_probe then
-        class_names = pcb_raid_class_candidates()
-    end
-    for _, class_name in ipairs(class_names) do
-        local objects = find_valid_objects({class_name}, 32)
-        for _, object in ipairs(objects) do
-            local object_name = full_name(object)
-            if not string.find(object_name, "Default__", 1, true) then
-                local active, source = pcb_read_boolean(
-                    {object},
-                    {
-                        "IsActive",
-                        "IsBattleActive",
-                        "IsInBattle",
-                        "IsRaidActive",
-                        "IsRaidBossBattle",
-                    },
-                    {
-                        "bIsActive",
-                        "bBattleActive",
-                        "bIsInBattle",
-                        "bRaidActive",
-                    }
-                )
-                if active == true and active_object == nil then
-                    active_object = object
-                    active_source = source
-                end
-                if include_probe and #records < 128 then
-                    table.insert(records, table.concat({
-                        class_name,
-                        object_name,
-                        active == nil and "unknown" or tostring(active),
-                        source,
-                    }, "~"))
-                end
-            end
-        end
-    end
-    return active_object, active_source, class_names, records
-end
-
 local function pcb_collect_raid_reserves(diagnostics, excluded_ids)
     scheduler_metrics.palbox_scans =
         scheduler_metrics.palbox_scans + 1
@@ -4800,36 +3832,6 @@ local function pcb_reserve_records(reserves, maximum_count)
     return records
 end
 
-local function pcb_parse_ranked_reserves(value)
-    local reserves = {}
-    local seen = {}
-    for record in string.gmatch(tostring(value or ""), "([^|]+)") do
-        local pal_id, level_text =
-            string.match(record, "^([^~]+)~([^~]+)$")
-        local level = tonumber(level_text)
-        if is_guid(pal_id) and level ~= nil and level >= 1 and
-            not seen[pal_id] then
-            seen[pal_id] = true
-            table.insert(reserves, {
-                character_id = "",
-                hp = nil,
-                index = -1,
-                level = level,
-                nickname = "",
-                page = -1,
-                pal_id = pal_id,
-            })
-        end
-    end
-    table.sort(reserves, function(left, right)
-        if left.level ~= right.level then
-            return left.level > right.level
-        end
-        return left.pal_id < right.pal_id
-    end)
-    return reserves
-end
-
 local function pcb_raid_deployment_state(base_id)
     local model, director, container = pcb_base_roster(base_id)
     local state = {
@@ -4876,6 +3878,30 @@ local function pcb_raid_reserve_signature(reserve, include_health)
     return table.concat(values, ":")
 end
 
+local function pcb_recount_invalidated_reserves()
+    local count = 0
+    for _ in pairs(raid_manager.invalidated_reserves) do
+        count = count + 1
+    end
+    raid_manager.invalidated_reserve_count = count
+    return count
+end
+
+-- A reserve is usable only when its level and downed state are both
+-- authoritative and it is not downed. Anything else is a reason to skip it.
+local function pcb_reserve_rejection(combat)
+    if not combat.downed_known then
+        return "reserve health became unavailable"
+    end
+    if combat.downed then
+        return "reserve became unhealthy"
+    end
+    if combat.level == nil then
+        return "reserve level became unavailable"
+    end
+    return nil
+end
+
 local function pcb_invalidate_raid_reserve(
     reserve,
     reason,
@@ -4892,14 +3918,11 @@ local function pcb_invalidate_raid_reserve(
         ),
         unlock_on_health_change = unlock_on_health_change == true,
     }
-    local count = 0
-    for _ in pairs(raid_manager.invalidated_reserves) do
-        count = count + 1
-    end
-    raid_manager.invalidated_reserve_count = count
+    pcb_recount_invalidated_reserves()
 end
 
 local function pcb_rebuild_raid_queue(reason)
+    local build_started_at = os.clock()
     local diagnostics = {}
     local candidates = pcb_collect_raid_reserves(diagnostics)
     local reserves = {}
@@ -4918,27 +3941,21 @@ local function pcb_rebuild_raid_queue(reason)
             table.insert(reserves, candidate)
         end
     end
-    local invalidated_count = 0
-    for _ in pairs(raid_manager.invalidated_reserves) do
-        invalidated_count = invalidated_count + 1
-    end
-    raid_manager.invalidated_reserve_count = invalidated_count
+    pcb_recount_invalidated_reserves()
     local deployment = pcb_raid_deployment_state(raid_manager.base_id)
     raid_manager.reserves = reserves
-    raid_manager.reserve_count = #reserves
     raid_manager.healthy_palbox_count =
         tonumber(diagnostics.healthy) or #reserves
     raid_manager.palbox_occupied_count =
         tonumber(diagnostics.occupied) or 0
     raid_manager.deployment_capacity = deployment.capacity
     raid_manager.deployed_count = deployment.deployed
-    raid_manager.auto_deployable_count =
-        deployment.automatic_available and
-            math.min(#reserves, #deployment.empty_slots) or 0
     raid_manager.queue_built_at_ms = now_ms()
     raid_manager.queue_rebuild_count =
         raid_manager.queue_rebuild_count + 1
     raid_manager.queue_rebuild_reason = tostring(reason or "periodic")
+    scheduler_metrics.last_queue_build_ms =
+        math.floor((os.clock() - build_started_at) * 1000)
     return deployment, diagnostics
 end
 
@@ -4946,22 +3963,12 @@ local function pcb_take_healthy_raid_reserve()
     local storage = pcb_player_pal_storage()
     while #raid_manager.reserves > 0 do
         local candidate = table.remove(raid_manager.reserves, 1)
-        local live_slot = nil
-        local candidate_slot = nil
-        pcall(function()
-            candidate_slot =
-                unwrap(storage:GetSlot(candidate.page, candidate.index))
-        end)
-        if pcb_slot_identity(candidate_slot) == candidate.pal_id then
-            live_slot = {
-                index = candidate.index,
-                page = candidate.page,
-                slot = candidate_slot,
-            }
-        else
-            live_slot =
-                pcb_find_palbox_slot(storage, candidate.pal_id)
-        end
+        local live_slot = pcb_resolve_palbox_slot(
+            storage,
+            candidate.pal_id,
+            candidate.page,
+            candidate.index
+        )
         if live_slot ~= nil then
             local _, _, _, _, individual =
                 pcb_slot_identity(live_slot.slot)
@@ -4970,16 +3977,13 @@ local function pcb_take_healthy_raid_reserve()
             candidate.index = live_slot.index
             candidate.level = combat.level or candidate.level
             candidate.hp = combat.hp
-            if combat.level ~= nil and combat.downed_known and
-                not combat.downed then
-                raid_manager.reserve_count = #raid_manager.reserves
+            local rejection = pcb_reserve_rejection(combat)
+            if rejection == nil then
                 return candidate
             end
             pcb_invalidate_raid_reserve(
                 candidate,
-                combat.downed_known and
-                    "reserve became unhealthy" or
-                    "reserve health became unavailable",
+                rejection,
                 combat.downed_known and combat.downed
             )
         else
@@ -4989,8 +3993,110 @@ local function pcb_take_healthy_raid_reserve()
             )
         end
     end
-    raid_manager.reserve_count = 0
     return nil
+end
+
+-- One authoritative Raid Manager reset. Every stop path and activation goes
+-- through this, so no field is ever left behind. The cumulative counters are
+-- deliberately not cleared here: they describe the session that just ended and
+-- activation zeroes them when a new one begins.
+local function pcb_reset_raid_manager_state()
+    raid_manager.base_id = ""
+    raid_manager.healthy_palbox_count = 0
+    raid_manager.palbox_occupied_count = 0
+    raid_manager.deployment_capacity = 0
+    raid_manager.deployed_count = 0
+    raid_manager.queue_built_at_ms = 0
+    raid_manager.queue_rebuild_count = 0
+    raid_manager.queue_rebuild_reason = ""
+    raid_manager.invalidated_reserves = {}
+    raid_manager.invalidated_reserve_count = 0
+    raid_manager.started_at_ms = 0
+    raid_manager.last_check_at_ms = 0
+    raid_manager.manager_state = MANAGER_STATE_OFF
+    raid_manager.reinforcement_pass_requested = false
+    raid_manager.reinforcement_request_reason = ""
+    raid_manager.reinforcement_pass_running = false
+    raid_manager.raid_phase_missing_samples = 0
+    raid_manager.raid_phase_seen_battle = false
+    raid_manager.raid_phase_state = ""
+    raid_manager.next_bulk_deploy_at_ms = 0
+    raid_manager.zero_healthy_warned = false
+    raid_manager.reserves = {}
+end
+
+local function pcb_stop_raid_manager(reason, notify_player)
+    pcb_reset_raid_manager_state()
+    raid_manager.mode = "off"
+    raid_manager.stopped_reason = tostring(reason or "stopped")
+    if notify_player then
+        notify(
+            "normal",
+            "PalCom: Raid Manager stopped - " ..
+                raid_manager.stopped_reason .. "."
+        )
+    end
+end
+
+-- Every roster write needs the same four identities, and a missing one is
+-- always fatal. Resolve them once here instead of in each caller.
+local function pcb_worker_move_identity(base_id, model, container)
+    local base_network = pcb_live_network_base_camp()
+    local container_id = nil
+    local native_base_id = nil
+    pcall(function()
+        container_id = container:GetId()
+        native_base_id = model:GetId()
+    end)
+    local palbox_map_object_id, palbox_map_object =
+        pcb_base_palbox_map_object_id(base_id, model)
+    if not is_valid(base_network) or container_id == nil or
+        native_base_id == nil or palbox_map_object_id == nil then
+        return nil
+    end
+    return {
+        base_network = base_network,
+        container_id = container_id,
+        native_base_id = native_base_id,
+        palbox_map_object = palbox_map_object,
+        palbox_map_object_id = palbox_map_object_id,
+    }
+end
+
+-- The two authoritative worker RPCs. A generic container swap moves the
+-- roster entry without running the worker spawn lifecycle, so anything that
+-- must be visible in the world goes through these.
+local function pcb_request_worker_deploy(identity, palbox_slot_id)
+    return pcall(function()
+        identity.base_network:RequestMoveCharacterToWorker_ToServer(
+            identity.native_base_id,
+            palbox_slot_id,
+            identity.container_id,
+            identity.palbox_map_object_id
+        )
+    end)
+end
+
+local function pcb_request_worker_withdraw(
+    identity,
+    base_slot_id,
+    palbox_page
+)
+    return pcall(function()
+        identity.base_network:RequestMoveWorkerToPalBox_ToServer(
+            identity.native_base_id,
+            base_slot_id,
+            palbox_page,
+            identity.palbox_map_object_id
+        )
+    end)
+end
+
+-- A move counts as verified only when the Pal reached the target slot and
+-- left the source slot.
+local function pcb_move_verified(source_slot, target_slot, pal_id)
+    return pcb_slot_identity(target_slot) == pal_id and
+        pcb_slot_identity(source_slot) ~= pal_id
 end
 
 local function pcb_deploy_raid_pal(
@@ -5016,21 +4122,12 @@ local function pcb_deploy_raid_pal(
             {}
     end
     local target = requested_target or deployment.empty_slots[1]
-    local source = nil
-    local expected_slot = nil
-    pcall(function()
-        expected_slot =
-            unwrap(storage:GetSlot(reserve.page, reserve.index))
-    end)
-    if pcb_slot_identity(expected_slot) == reserve.pal_id then
-        source = {
-            index = reserve.index,
-            page = reserve.page,
-            slot = expected_slot,
-        }
-    else
-        source = pcb_find_palbox_slot(storage, reserve.pal_id)
-    end
+    local source = pcb_resolve_palbox_slot(
+        storage,
+        reserve.pal_id,
+        reserve.page,
+        reserve.index
+    )
     if target == nil then
         return false, "The base has no empty Pal slots.", {}
     end
@@ -5065,50 +4162,43 @@ local function pcb_deploy_raid_pal(
 
     local source_slot_id = nil
     local target_slot_id = nil
-    local base_container_id = nil
-    local native_base_id = nil
     pcall(function()
         source_slot_id = source.slot:GetSlotId()
         target_slot_id = target.slot:GetSlotId()
-        base_container_id = deployment.container:GetId()
-        native_base_id = deployment.model:GetId()
     end)
-    local palbox_map_object_id, palbox_map_object =
-        pcb_base_palbox_map_object_id(base_id, deployment.model)
+    local identity = pcb_worker_move_identity(
+        base_id,
+        deployment.model,
+        deployment.container
+    )
     if source_slot_id == nil or target_slot_id == nil or
-        base_container_id == nil or native_base_id == nil or
-        palbox_map_object_id == nil then
+        identity == nil then
         return false, "Base deployment identity is unavailable.", {}
     end
     local visible_lifecycle = use_visible_lifecycle ~= false
     local request_method = visible_lifecycle and
         "RequestMoveCharacterToWorker_ToServer" or
         "RequestSwap_ToServer_Rep"
-    local request_ok, request_error = pcall(function()
-        if visible_lifecycle then
-            base_network:RequestMoveCharacterToWorker_ToServer(
-                native_base_id,
-                source_slot_id,
-                base_container_id,
-                palbox_map_object_id
-            )
-        else
+    local request_ok, request_error
+    if visible_lifecycle then
+        request_ok, request_error =
+            pcb_request_worker_deploy(identity, source_slot_id)
+    else
+        request_ok, request_error = pcall(function()
             network:RequestSwap_ToServer_Rep(
                 source_slot_id,
                 target_slot_id
             )
-        end
-    end)
+        end)
+    end
     local target_pal_id = pcb_slot_identity(target.slot)
     local source_pal_id = pcb_slot_identity(source.slot)
-    local verified = request_ok and
-        target_pal_id == reserve.pal_id and
-        source_pal_id ~= reserve.pal_id
-    if verified then
+    if request_ok and
+        pcb_move_verified(source.slot, target.slot, reserve.pal_id) then
         return true, "Base Pal deployed and verified.", {
             data_base_id = base_id,
             data_reserve_pal_id = reserve.pal_id,
-            data_palbox_map_object = palbox_map_object,
+            data_palbox_map_object = identity.palbox_map_object,
             data_request_method = request_method,
             data_source = source_location,
             data_target = target_location,
@@ -5130,21 +4220,21 @@ local function pcb_deploy_raid_pal(
     local rollback_ok = false
     local rollback_error = ""
     if target_pal_id == reserve.pal_id then
-        local ok, error_value = pcall(function()
-            if visible_lifecycle then
-                base_network:RequestMoveWorkerToPalBox_ToServer(
-                    native_base_id,
-                    target_slot_id,
-                    source.page,
-                    palbox_map_object_id
-                )
-            else
+        local ok, error_value
+        if visible_lifecycle then
+            ok, error_value = pcb_request_worker_withdraw(
+                identity,
+                target_slot_id,
+                source.page
+            )
+        else
+            ok, error_value = pcall(function()
                 network:RequestSwap_ToServer_Rep(
                     target_slot_id,
                     source_slot_id
                 )
-            end
-        end)
+            end)
+        end
         rollback_ok = ok and
             pcb_slot_identity(source.slot) == reserve.pal_id
         if not ok then
@@ -5258,515 +4348,6 @@ local function pcb_combat_surface(label, object)
     return records
 end
 
-local function pcb_get_raid_state(command)
-    local include_probe = tostring(command.include_probe or "false") == "true"
-    local include_reserves =
-        tostring(command.include_reserves or "false") == "true"
-    local context = player_context(true, false)
-    local base_id = tostring(context.data_current_base_id or "")
-    local owned = context.data_current_base_is_owned == "true"
-    local model, director, container = pcb_base_roster(base_id)
-    local _, _, raid_container, raid_context =
-        pcb_raid_area_roster(base_id)
-    local deployment = pcb_raid_deployment_state(base_id)
-    container = raid_container
-    local phase_state_name = full_name(raid_context.phase_state)
-    local raid_area_battle_active = string.find(
-        phase_state_name,
-        "PalRaidBossAreaPhaseBattleState",
-        1,
-        true
-    ) ~= nil
-    local palboxes = is_guid(base_id) and pcb_base_palboxes(base_id) or {}
-    local raid_object, raid_source, raid_classes, raid_records =
-        pcb_raid_objects(include_probe)
-
-    local fighters = {}
-    local downed_count = 0
-    local downed_known_count = 0
-    local first_worker = nil
-    local controller_fighters = {}
-    if is_guid(base_id) and is_guid(raid_context.owner_base_id) then
-        controller_fighters = pcb_collect_raid_fighters(
-            base_id,
-            raid_context.owner_base_id,
-            raid_area_battle_active
-        )
-    end
-    if is_guid(base_id) and is_valid(container) then
-        local workers_by_id = {}
-        for _, worker in ipairs(collect_base_workers(base_id)) do
-            workers_by_id[worker.pal_id] = worker
-            first_worker = first_worker or worker
-        end
-        for _, entry in ipairs(pcb_container_slots(container)) do
-            local pal_id, character_id, nickname, _, individual =
-                pcb_slot_identity(entry.slot)
-            if is_guid(pal_id) then
-                local worker = workers_by_id[pal_id]
-                local combat = pcb_pal_combat_state(
-                    worker and worker.pawn or nil,
-                    worker and worker.parameter or nil,
-                    worker and worker.individual or individual
-                )
-                if combat.downed then
-                    downed_count = downed_count + 1
-                end
-                if combat.downed_known then
-                    downed_known_count = downed_known_count + 1
-                end
-                table.insert(fighters, table.concat({
-                    tostring(entry.index),
-                    pal_id,
-                    character_id,
-                    nickname,
-                    combat.level == nil and "" or tostring(combat.level),
-                    combat.hp == nil and "" or tostring(combat.hp),
-                    combat.max_hp == nil and "" or tostring(combat.max_hp),
-                    combat.downed and "true" or "false",
-                    combat.downed_known and "true" or "false",
-                    combat.level_source,
-                    combat.hp_source,
-                    combat.max_hp_source,
-                    combat.downed_source,
-                }, "~"))
-            end
-        end
-    elseif #controller_fighters > 0 then
-        first_worker = controller_fighters[1]
-        for _, worker in ipairs(controller_fighters) do
-            local combat = pcb_pal_combat_state(
-                worker.pawn,
-                worker.parameter,
-                worker.individual
-            )
-            if combat.downed then
-                downed_count = downed_count + 1
-            end
-            if combat.downed_known then
-                downed_known_count = downed_known_count + 1
-            end
-            table.insert(fighters, table.concat({
-                "-1",
-                worker.pal_id,
-                worker.character_id,
-                worker.nickname,
-                combat.level == nil and "" or
-                    tostring(combat.level),
-                combat.hp == nil and "" or tostring(combat.hp),
-                combat.max_hp == nil and "" or
-                    tostring(combat.max_hp),
-                combat.downed and "true" or "false",
-                combat.downed_known and "true" or "false",
-                combat.level_source,
-                combat.hp_source,
-                combat.max_hp_source,
-                combat.downed_source,
-            }, "~"))
-        end
-    end
-
-    local probe = {}
-    if include_probe and first_worker ~= nil then
-        for _, record in ipairs(pcb_combat_surface(
-            "fighter.pawn",
-            first_worker.pawn
-        )) do
-            table.insert(probe, record)
-        end
-        for _, record in ipairs(pcb_combat_surface(
-            "fighter.parameter",
-            first_worker.parameter
-        )) do
-            table.insert(probe, record)
-        end
-        for _, record in ipairs(pcb_combat_surface(
-            "fighter.individual",
-            first_worker.individual
-        )) do
-            table.insert(probe, record)
-        end
-    end
-
-    local raid_area_ready = string.find(
-        phase_state_name,
-        "PalRaidBossAreaPhaseReadyState",
-        1,
-        true
-    ) ~= nil
-    local raid_area_appearance = string.find(
-        phase_state_name,
-        "PalRaidBossAreaPhaseAppearanceState",
-        1,
-        true
-    ) ~= nil
-    local raid_area_can_arm = raid_area_ready or
-        raid_area_appearance or raid_area_battle_active
-    local gate_ready = owned and #palboxes == 1 and
-        is_guid(raid_context.owner_base_id) and raid_area_can_arm and
-        deployment.automatic_available and
-        deployment.capacity > 0 and
-        (not raid_area_battle_active or
-            downed_known_count == #fighters)
-    local raid_active =
-        is_valid(raid_object) or raid_area_battle_active
-    local reserve_diagnostics = {}
-    local reserves = include_reserves and
-        pcb_collect_raid_reserves(reserve_diagnostics) or
-        raid_manager.reserves
-    local reserve_records = pcb_reserve_records(reserves, 64)
-    local healthy_palbox_count = include_reserves and
-        (tonumber(reserve_diagnostics.healthy) or #reserves) or
-        raid_manager.healthy_palbox_count
-    local palbox_occupied_count = include_reserves and
-        (tonumber(reserve_diagnostics.occupied) or 0) or
-        raid_manager.palbox_occupied_count
-    local auto_deployable_count =
-        deployment.automatic_available and
-            math.min(#reserves, #deployment.empty_slots) or 0
-    local queue_age_ms = raid_manager.queue_built_at_ms > 0 and
-        math.max(0, now_ms() - raid_manager.queue_built_at_ms) or 0
-    local manager_elapsed_ms = raid_manager.started_at_ms > 0 and
-        math.max(0, now_ms() - raid_manager.started_at_ms) or 0
-    local manager_remaining_ms = raid_manager.started_at_ms > 0 and
-        math.max(
-            0,
-            CONFIG.raid_manager_timeout_ms - manager_elapsed_ms
-        ) or CONFIG.raid_manager_timeout_ms
-    return true, "Live Raid Area state inspected.", {
-        data_base_id = base_id,
-        data_base_name = tostring(context.data_current_base_name or ""),
-        data_current_base_is_owned = owned and "true" or "false",
-        data_downed_count = tostring(downed_count),
-        data_downed_known_count = tostring(downed_known_count),
-        data_fighter_count = tostring(#fighters),
-        data_fighter_source = is_valid(raid_container) and
-            "raid_container" or
-            (#controller_fighters > 0 and
-                "nearby_owner_base_controllers" or "unavailable"),
-        data_fighters = table.concat(fighters, "|"),
-        data_gate_ready = gate_ready and "true" or "false",
-        data_manager_mode = raid_manager.mode,
-        data_manager_status = raid_manager.phase_status,
-        data_manager_stopped_reason = raid_manager.stopped_reason,
-        data_expected_fighter_queue_count =
-            tostring(#raid_manager.reserves),
-        data_expected_fighter_queue_rebuild_count =
-            tostring(raid_manager.queue_rebuild_count),
-        data_expected_fighter_queue_rebuild_interval_ms =
-            tostring(CONFIG.raid_queue_rebuild_interval_ms),
-        data_expected_fighter_queue_last_reason =
-            raid_manager.queue_rebuild_reason,
-        data_expected_fighter_queue_age_ms = tostring(queue_age_ms),
-        data_expected_fighter_queue_invalidated_count =
-            tostring(raid_manager.invalidated_reserve_count),
-        data_manager_timeout_ms =
-            tostring(CONFIG.raid_manager_timeout_ms),
-        data_manager_elapsed_ms = tostring(manager_elapsed_ms),
-        data_manager_remaining_ms = tostring(manager_remaining_ms),
-        data_palbox = #palboxes == 1 and full_name(palboxes[1]) or "",
-        data_palbox_count = tostring(#palboxes),
-        data_palbox_healthy_count = tostring(healthy_palbox_count),
-        data_palbox_occupied_count = tostring(palbox_occupied_count),
-        data_automatic_deployment_available =
-            deployment.automatic_available and "true" or "false",
-        data_automatic_deployable_count =
-            tostring(auto_deployable_count),
-        data_deployed_count = tostring(deployment.deployed),
-        data_deployment_capacity = tostring(deployment.capacity),
-        data_empty_deployment_slot_count =
-            tostring(#deployment.empty_slots),
-        data_raid_active = raid_active and "true" or "false",
-        data_raid_area_container = full_name(raid_container),
-        data_raid_area_container_module =
-            full_name(raid_context.module),
-        data_raid_area_owner_base_id =
-            tostring(raid_context.owner_base_id or ""),
-        data_raid_area_phase =
-            tostring(raid_context.phase or ""),
-        data_raid_area_phase_state =
-            full_name(raid_context.phase_state),
-        data_raid_area_roster_available =
-            is_valid(raid_container) and "true" or "false",
-        data_raid_area_roster_model =
-            full_name(raid_context.roster_model),
-        data_raid_area_roster_source =
-            tostring(raid_context.roster_source or ""),
-        data_raid_area_objects = include_probe and
-            table.concat(pcb_raid_area_object_probe(), "|") or "",
-        data_raid_metadata_surface = include_probe and
-            table.concat(pcb_raid_metadata_surface(), "|") or "",
-        data_raid_module_declared = include_probe and
-            table.concat(
-                declared_function_surface(raid_context.module),
-                "|"
-            ) or "",
-        data_raid_class_candidates = table.concat(raid_classes, "|"),
-        data_raid_objects = table.concat(raid_records, "|"),
-        data_raid_signal = is_valid(raid_object) and
-            full_name(raid_object) or "",
-        data_raid_signal_source = raid_source,
-        data_deployment_count = tostring(raid_manager.deployment_count),
-        data_replacement_count = tostring(raid_manager.replacement_count),
-        data_reserve_count = tostring(#reserves),
-        data_reserve_health_known_count =
-            tostring(reserve_diagnostics.health_known or 0),
-        data_reserve_individual_valid_count =
-            tostring(reserve_diagnostics.individual_valid or 0),
-        data_reserve_level_known_count =
-            tostring(reserve_diagnostics.level_known or 0),
-        data_reserve_occupied_count =
-            tostring(reserve_diagnostics.occupied or 0),
-        data_reserve_probe = include_probe and
-            table.concat(reserve_diagnostics.samples or {}, "|") or "",
-        data_reserves = table.concat(reserve_records, "|"),
-        data_reserves_truncated =
-            #reserves > #reserve_records and "true" or "false",
-        data_surface_probe = table.concat(probe, "|"),
-        data_palbox_metadata_surface = include_probe and
-            table.concat(pcb_palbox_metadata_surface(), "|") or "",
-    }
-end
-
-local function pcb_set_raid_manager(command, dry_run)
-    local mode = string.lower(tostring(command.mode or ""))
-    if mode ~= "off" and mode ~= "observe" and mode ~= "auto" then
-        return false, "mode must be off, observe, or auto.", {}
-    end
-    if mode == "off" then
-        if not dry_run then
-            raid_manager.mode = "off"
-            raid_manager.stopped_reason = "stopped by player"
-            raid_manager.base_id = ""
-            raid_manager.base_name = ""
-            raid_manager.palbox = ""
-            raid_manager.raid_signal = ""
-            raid_manager.roster_base_id = ""
-            raid_manager.battle_started = false
-            raid_manager.phase_status = ""
-            raid_manager.reserves = {}
-            raid_manager.reserve_count = 0
-            raid_manager.healthy_palbox_count = 0
-            raid_manager.palbox_occupied_count = 0
-            raid_manager.deployment_capacity = 0
-            raid_manager.deployed_count = 0
-            raid_manager.auto_deployable_count = 0
-            raid_manager.queue_built_at_ms = 0
-            raid_manager.queue_rebuild_count = 0
-            raid_manager.queue_rebuild_reason = ""
-            raid_manager.invalidated_reserves = {}
-            raid_manager.invalidated_reserve_count = 0
-            raid_manager.started_at_ms = 0
-            raid_manager.battle_started_at_ms = 0
-            raid_fighter_cache = nil
-            action_notification(true, "PalCom: Raid Manager stopped.")
-        end
-        return true,
-            dry_run and
-                "Raid Manager stop validated; no state changed." or
-                "Raid Manager stopped.",
-            {data_mode = dry_run and raid_manager.mode or "off"}
-    end
-
-    local context = player_context(true, false)
-    local base_id = tostring(context.data_current_base_id or "")
-    local owned = context.data_current_base_is_owned == "true"
-    local _, director, container = pcb_base_roster(base_id)
-    local palboxes = is_guid(base_id) and pcb_base_palboxes(base_id) or {}
-    local _, _, raid_container, raid_context =
-        pcb_raid_area_roster(base_id)
-    local deployment = pcb_raid_deployment_state(base_id)
-    local phase_state_name = full_name(raid_context.phase_state)
-    local raid_active = string.find(
-        phase_state_name,
-        "PalRaidBossAreaPhaseBattleState",
-        1,
-        true
-    ) ~= nil
-    local fighters = is_guid(raid_context.owner_base_id) and
-        pcb_collect_raid_fighters(
-            base_id,
-            raid_context.owner_base_id,
-            raid_active
-        ) or {}
-    local raid_ready = string.find(
-        phase_state_name,
-        "PalRaidBossAreaPhaseReadyState",
-        1,
-        true
-    ) ~= nil
-    local raid_appearance = string.find(
-        phase_state_name,
-        "PalRaidBossAreaPhaseAppearanceState",
-        1,
-        true
-    ) ~= nil
-    local raid_can_arm = raid_ready or raid_appearance or raid_active
-    local health_known = true
-    local deployed_health_known = true
-    if is_valid(raid_container) then
-        for _, entry in ipairs(pcb_container_slots(raid_container)) do
-            local pal_id, _, _, _, individual =
-                pcb_slot_identity(entry.slot)
-            if is_guid(pal_id) then
-                local combat =
-                    pcb_pal_combat_state(nil, nil, individual)
-                if not combat.downed_known then
-                    deployed_health_known = false
-                    break
-                end
-            end
-        end
-    end
-    for _, fighter in ipairs(fighters) do
-        local combat = pcb_pal_combat_state(
-            fighter.pawn,
-            fighter.parameter,
-            fighter.individual
-        )
-        if not combat.downed_known then
-            health_known = false
-            break
-        end
-    end
-    if is_valid(raid_container) then
-        health_known = deployed_health_known
-    end
-    local automatic_ready = mode ~= "auto" or
-        (deployment.automatic_available and
-            deployment.capacity > 0)
-    local gate_ready = owned and #palboxes == 1 and
-        raid_can_arm and is_guid(raid_context.owner_base_id) and
-        automatic_ready and
-        (not raid_active or health_known)
-    if not gate_ready then
-        return false,
-            "Raid Manager requires your loaded Raid Area in Ready, Appearance, or Battle phase with exactly one Palbox.",
-            {
-                data_current_base_is_owned = owned and "true" or "false",
-                data_palbox_count = tostring(#palboxes),
-                data_raid_active =
-                    raid_active and "true" or "false",
-                data_fighter_count = tostring(#fighters),
-                data_automatic_deployment_available =
-                    deployment.automatic_available and "true" or "false",
-                data_deployment_capacity =
-                    tostring(deployment.capacity),
-                data_deployed_count = tostring(deployment.deployed),
-                data_health_authoritative =
-                    health_known and "true" or "false",
-                data_raid_can_arm =
-                    raid_can_arm and "true" or "false",
-            }
-    end
-    local reserve_diagnostics = {}
-    local reserves =
-        pcb_collect_raid_reserves(reserve_diagnostics)
-    if dry_run then
-        return true,
-            "Raid Manager activation validated; no state changed.",
-            {
-                data_base_id = base_id,
-                data_mode = mode,
-                data_palbox = full_name(palboxes[1]),
-                data_reserve_count = tostring(#reserves),
-                data_palbox_healthy_count =
-                    tostring(reserve_diagnostics.healthy or #reserves),
-                data_palbox_occupied_count =
-                    tostring(reserve_diagnostics.occupied or 0),
-                data_automatic_deployment_available =
-                    deployment.automatic_available and "true" or "false",
-                data_automatic_deployable_count =
-                    tostring(
-                        deployment.automatic_available and
-                            math.min(
-                                #reserves,
-                                #deployment.empty_slots
-                            ) or 0
-                    ),
-                data_deployment_capacity =
-                    tostring(deployment.capacity),
-                data_deployed_count = tostring(deployment.deployed),
-                data_manager_timeout_ms =
-                    tostring(CONFIG.raid_manager_timeout_ms),
-                data_raid_signal = phase_state_name,
-                data_roster_base_id =
-                    raid_context.owner_base_id,
-                data_validated = "true",
-            }
-    end
-
-    raid_manager.mode = mode
-    raid_manager.base_id = base_id
-    raid_manager.base_name =
-        tostring(context.data_current_base_name or "")
-    raid_manager.palbox = full_name(palboxes[1])
-    raid_manager.raid_signal = phase_state_name
-    raid_manager.roster_base_id = raid_context.owner_base_id
-    raid_manager.stopped_reason = ""
-    raid_manager.fighter_count = deployment.deployed
-    raid_manager.downed_count = 0
-    raid_manager.tick_count = 0
-    raid_fighter_cache = nil
-    raid_manager.battle_started = raid_active
-    raid_manager.phase_status = raid_active and "active" or "armed"
-    raid_manager.reserves = reserves
-    raid_manager.healthy_palbox_count =
-        tonumber(reserve_diagnostics.healthy) or #reserves
-    raid_manager.palbox_occupied_count =
-        tonumber(reserve_diagnostics.occupied) or 0
-    raid_manager.deployment_capacity = deployment.capacity
-    raid_manager.deployed_count = deployment.deployed
-    raid_manager.auto_deployable_count =
-        deployment.automatic_available and
-            math.min(#reserves, #deployment.empty_slots) or 0
-    raid_manager.queue_built_at_ms = now_ms()
-    raid_manager.queue_rebuild_count = 1
-    raid_manager.queue_rebuild_reason = "activation"
-    raid_manager.invalidated_reserves = {}
-    raid_manager.invalidated_reserve_count = 0
-    raid_manager.started_at_ms = now_ms()
-    raid_manager.battle_started_at_ms =
-        raid_active and raid_manager.started_at_ms or 0
-    action_notification(
-        true,
-        raid_active and
-            (mode == "auto" and
-                "PalCom: Raid Manager active." or
-                "PalCom: Raid Manager observing.") or
-            "PalCom: Raid Manager armed for battle."
-    )
-    return true,
-        raid_active and "Raid Manager activated." or
-            "Raid Manager armed; replacements begin in Battle.",
-        {
-        data_base_id = base_id,
-        data_mode = mode,
-        data_manager_status = raid_manager.phase_status,
-        data_palbox = raid_manager.palbox,
-        data_reserve_count = tostring(#reserves),
-        data_palbox_healthy_count =
-            tostring(raid_manager.healthy_palbox_count),
-        data_palbox_occupied_count =
-            tostring(raid_manager.palbox_occupied_count),
-        data_automatic_deployment_available =
-            deployment.automatic_available and "true" or "false",
-        data_automatic_deployable_count =
-            tostring(raid_manager.auto_deployable_count),
-        data_deployment_capacity =
-            tostring(raid_manager.deployment_capacity),
-        data_deployed_count = tostring(raid_manager.deployed_count),
-        data_expected_fighter_queue_count = tostring(#reserves),
-        data_expected_fighter_queue_rebuild_interval_ms =
-            tostring(CONFIG.raid_queue_rebuild_interval_ms),
-        data_expected_fighter_queue_invalidated_count = "0",
-        data_manager_timeout_ms =
-            tostring(CONFIG.raid_manager_timeout_ms),
-        data_raid_signal = raid_manager.raid_signal,
-        data_roster_base_id = raid_manager.roster_base_id,
-    }
-end
-
 function pcb_swap_raid_pal(command, dry_run)
     local base_id = tostring(command.base_id or "")
     local downed_pal_id = tostring(command.downed_pal_id or "")
@@ -5789,24 +4370,12 @@ function pcb_swap_raid_pal(command, dry_run)
     end
 
     local downed_slot = pcb_find_base_slot(container, downed_pal_id)
-    local reserve_slot = nil
-    if reserve_page ~= nil and reserve_index ~= nil then
-        local expected_slot = nil
-        pcall(function()
-            expected_slot =
-                unwrap(storage:GetSlot(reserve_page, reserve_index))
-        end)
-        if pcb_slot_identity(expected_slot) == reserve_pal_id then
-            reserve_slot = {
-                index = reserve_index,
-                page = reserve_page,
-                slot = expected_slot,
-            }
-        end
-    end
-    if reserve_slot == nil then
-        reserve_slot = pcb_find_palbox_slot(storage, reserve_pal_id)
-    end
+    local reserve_slot = pcb_resolve_palbox_slot(
+        storage,
+        reserve_pal_id,
+        reserve_page,
+        reserve_index
+    )
     if downed_slot == nil or reserve_slot == nil then
         return false,
             "The expected fighter or reserve was not found in its live roster.",
@@ -5849,30 +4418,18 @@ function pcb_swap_raid_pal(command, dry_run)
     end
 
     local empty_palbox_slot = pcb_find_empty_palbox_slot(storage)
-    local base_container_id = nil
-    local native_base_id = nil
-    pcall(function()
-        base_container_id = container:GetId()
-        native_base_id = model:GetId()
-    end)
-    local palbox_map_object_id, palbox_map_object =
-        pcb_base_palbox_map_object_id(base_id, model)
-    if empty_palbox_slot == nil or base_container_id == nil or
-        native_base_id == nil or palbox_map_object_id == nil then
+    local identity = pcb_worker_move_identity(base_id, model, container)
+    if empty_palbox_slot == nil or identity == nil then
         return false, "Base replacement identity is unavailable.", {}
     end
 
-    -- A generic container swap changes the roster without creating a worker
-    -- actor. Mirror the Palbox UI: withdraw the downed worker, then deploy the
+    -- Mirror the Palbox UI: withdraw the downed worker, then deploy the
     -- healthy reserve through the dedicated base-worker RPC.
-    local withdraw_ok, withdraw_error = pcall(function()
-        base_network:RequestMoveWorkerToPalBox_ToServer(
-            native_base_id,
-            target_slot_id,
-            empty_palbox_slot.page,
-            palbox_map_object_id
-        )
-    end)
+    local withdraw_ok, withdraw_error = pcb_request_worker_withdraw(
+        identity,
+        target_slot_id,
+        empty_palbox_slot.page
+    )
     local withdrawn_slot =
         withdraw_ok and pcb_find_palbox_slot(storage, downed_pal_id) or nil
     local base_slot_pal_id = pcb_slot_identity(downed_slot.slot)
@@ -5883,7 +4440,7 @@ function pcb_swap_raid_pal(command, dry_run)
                 "Downed base Pal withdrawal did not verify." or
                 tostring(withdraw_error), {
                 data_candidate_invalid = "false",
-                data_palbox_map_object = palbox_map_object,
+                data_palbox_map_object = identity.palbox_map_object,
                 data_request_method =
                     "RequestMoveWorkerToPalBox_ToServer",
                 data_verified = "false",
@@ -5903,7 +4460,7 @@ function pcb_swap_raid_pal(command, dry_run)
         return true, "Downed base Pal replaced and verified.", {
             data_base_id = base_id,
             data_downed_pal_id = downed_pal_id,
-            data_palbox_map_object = palbox_map_object,
+            data_palbox_map_object = identity.palbox_map_object,
             data_request_method =
                 "RequestMoveWorkerToPalBox_ToServer+" ..
                 "RequestMoveCharacterToWorker_ToServer",
@@ -5921,14 +4478,8 @@ function pcb_swap_raid_pal(command, dry_run)
         pcall(function()
             withdrawn_slot_id = withdrawn_slot.slot:GetSlotId()
         end)
-        local ok, error_value = pcall(function()
-            base_network:RequestMoveCharacterToWorker_ToServer(
-                native_base_id,
-                withdrawn_slot_id,
-                base_container_id,
-                palbox_map_object_id
-            )
-        end)
+        local ok, error_value =
+            pcb_request_worker_deploy(identity, withdrawn_slot_id)
         rollback_ok = ok and
             pcb_slot_identity(downed_slot.slot) == downed_pal_id and
             pcb_find_palbox_slot(storage, downed_pal_id) == nil
@@ -5936,10 +4487,9 @@ function pcb_swap_raid_pal(command, dry_run)
             rollback_error = tostring(error_value)
         end
     end
-    raid_manager.mode = "off"
-    raid_manager.stopped_reason =
-        "replacement verification failed"
-    raid_fighter_cache = nil
+    -- A half-applied replacement must stop the manager through the single
+    -- authoritative reset, not by clearing two fields here.
+    pcb_stop_raid_manager("replacement verification failed", true)
     return false, deploy_message, {
             data_deploy_details = tostring(deploy_details),
             data_rollback_error = rollback_error,
@@ -5948,322 +4498,45 @@ function pcb_swap_raid_pal(command, dry_run)
         }
 end
 
-local function pcb_stop_raid_manager(reason, notify)
-    raid_manager.mode = "off"
-    raid_manager.stopped_reason = tostring(reason or "stopped")
-    raid_manager.base_id = ""
-    raid_manager.base_name = ""
-    raid_manager.palbox = ""
-    raid_manager.raid_signal = ""
-    raid_manager.roster_base_id = ""
-    raid_manager.battle_started = false
-    raid_manager.manager_state = ""
-    raid_manager.reserves = {}
-    raid_manager.reserve_count = 0
-    raid_manager.healthy_palbox_count = 0
-    raid_manager.palbox_occupied_count = 0
-    raid_manager.deployment_capacity = 0
-    raid_manager.deployed_count = 0
-    raid_manager.auto_deployable_count = 0
-    raid_manager.queue_built_at_ms = 0
-    raid_manager.queue_rebuild_count = 0
-    raid_manager.queue_rebuild_reason = ""
-    raid_manager.invalidated_reserves = {}
-    raid_manager.invalidated_reserve_count = 0
-    raid_manager.started_at_ms = 0
-    raid_manager.last_check_at_ms = 0
-    raid_manager.battle_started_at_ms = 0
-    raid_manager.zero_healthy_warned = false
-    raid_fighter_cache = nil
-    if notify then
-        display_notification(
-            "PalCom: Raid Manager stopped - " ..
-                raid_manager.stopped_reason .. ".",
-            1
-        )
-    end
-end
-
-local function pcb_raid_manager_tick()
+-- The single raid-phase sampler. Battle completion stays transition-based: a
+-- positively observed Battle phase arms the latch, a later valid non-Battle
+-- phase stops the manager, and two consecutive missing instance samples after
+-- Battle are the guarded fallback. The 15-minute watchdog remains the last
+-- resort. Called from the readiness refresh, which is the only place that
+-- already reads the raid area.
+local function pcb_observe_raid_phase(instance, raid_context)
     if raid_manager.mode == "off" then
         return
     end
-    raid_manager.tick_count = raid_manager.tick_count + 1
-    if raid_manager.started_at_ms > 0 and
-        now_ms() - raid_manager.started_at_ms >=
-            CONFIG.raid_manager_timeout_ms then
-        pcb_stop_raid_manager(
-            "15-minute safety timeout reached",
-            true
-        )
-        return
-    end
-    if raid_manager.queue_built_at_ms == 0 or
-        now_ms() - raid_manager.queue_built_at_ms >=
-            CONFIG.raid_queue_rebuild_interval_ms then
-        pcb_rebuild_raid_queue("periodic")
-    end
-
-    local phase_state_name = ""
-    local phase_is_battle = false
-
-    -- Revalidate the encounter and the bound area once per second. Ready and
-    -- Appearance are armed states; only Battle permits health-driven writes.
-    if raid_manager.tick_count % 4 == 0 then
-        local controller = find_local_controller()
-        local state = find_local_player_state()
-        local current_base_id =
-            resolve_current_base_id(controller, state)
-        local palboxes = pcb_base_palboxes(raid_manager.base_id)
-        local _, _, _, raid_context =
-            pcb_raid_area_roster(raid_manager.base_id)
-        phase_state_name = full_name(raid_context.phase_state)
-        local phase_is_ready = string.find(
-            phase_state_name,
-            "PalRaidBossAreaPhaseReadyState",
-            1,
-            true
-        ) ~= nil
-        local phase_is_appearance = string.find(
-            phase_state_name,
-            "PalRaidBossAreaPhaseAppearanceState",
-            1,
-            true
-        ) ~= nil
-        phase_is_battle = string.find(
-            phase_state_name,
-            "PalRaidBossAreaPhaseBattleState",
-            1,
-            true
-        ) ~= nil
-        if current_base_id ~= "" and
-            current_base_id ~= raid_manager.base_id then
-            pcb_stop_raid_manager("player left the Raid Area", true)
-            return
-        end
-        if #palboxes ~= 1 or
-            full_name(palboxes[1]) ~= raid_manager.palbox then
-            pcb_stop_raid_manager("Raid Area Palbox changed", true)
-            return
-        end
-        if phase_is_battle then
-            raid_manager.battle_started = true
-            if raid_manager.battle_started_at_ms == 0 then
-                raid_manager.battle_started_at_ms = now_ms()
-            end
-            raid_manager.phase_status = "active"
-        elseif not raid_manager.battle_started and
-            (phase_is_ready or phase_is_appearance) then
-            raid_manager.phase_status = "armed"
-        else
-            pcb_stop_raid_manager(
-                raid_manager.battle_started and
-                    "raid ended" or "raid preparation ended",
-                true
-            )
-            return
-        end
-    end
-
-    -- Deployment and fighter health reads run at 500 ms against the bounded
-    -- Raid Area roster. Ready/Appearance may fill empty slots; only Battle
-    -- may replace an incapacitated fighter.
-    if raid_manager.tick_count % 2 ~= 0 then
-        return
-    end
-    if phase_state_name == "" then
-        local _, _, _, raid_context =
-            pcb_raid_area_roster(raid_manager.base_id)
-        phase_state_name = full_name(raid_context.phase_state)
-        phase_is_battle = string.find(
-            phase_state_name,
-            "PalRaidBossAreaPhaseBattleState",
-            1,
-            true
-        ) ~= nil
-    end
+    local phase_state = full_name(raid_context.phase_state)
+    raid_manager.raid_phase_state = phase_state
+    local phase_is_battle = string.find(
+        phase_state,
+        "PalRaidBossAreaPhaseBattleState",
+        1,
+        true
+    ) ~= nil
     if phase_is_battle then
-        raid_manager.battle_started = true
-        if raid_manager.battle_started_at_ms == 0 then
-            raid_manager.battle_started_at_ms = now_ms()
-        end
-        raid_manager.phase_status = "active"
-    elseif raid_manager.phase_status ~= "armed" then
+        raid_manager.raid_phase_seen_battle = true
+        raid_manager.raid_phase_missing_samples = 0
         return
     end
-    local deployment =
-        pcb_raid_deployment_state(raid_manager.base_id)
-    raid_manager.deployment_capacity = deployment.capacity
-    raid_manager.deployed_count = deployment.deployed
-    raid_manager.fighter_count = deployment.deployed
-    raid_manager.auto_deployable_count =
-        deployment.automatic_available and
-            math.min(
-                #raid_manager.reserves,
-                #deployment.empty_slots
-            ) or 0
-    if not is_valid(deployment.container) then
-        if raid_manager.mode == "auto" then
-            pcb_stop_raid_manager(
-                "live Raid Area deployment surface is unavailable",
-                true
-            )
-        else
-            raid_manager.phase_status =
-                "deployment_surface_unavailable"
+    if is_valid(instance) and is_valid(raid_context.phase_state) then
+        raid_manager.raid_phase_missing_samples = 0
+        if raid_manager.raid_phase_seen_battle then
+            pcb_stop_raid_manager("raid battle phase ended", true)
         end
         return
     end
-
-    local downed_worker = nil
-    local downed_count = 0
-    for _, entry in ipairs(pcb_container_slots(deployment.container)) do
-        local pal_id, character_id, nickname, _, individual =
-            pcb_slot_identity(entry.slot)
-        if is_guid(pal_id) then
-            local combat =
-                pcb_pal_combat_state(nil, nil, individual)
-            if phase_is_battle and combat.downed_known and
-                combat.downed then
-                downed_count = downed_count + 1
-                downed_worker = downed_worker or {
-                    character_id = character_id,
-                    nickname = nickname,
-                    pal_id = pal_id,
-                }
-            end
-        end
-    end
-    raid_manager.downed_count = downed_count
-    if raid_manager.mode ~= "auto" then
+    if not raid_manager.raid_phase_seen_battle then
         return
     end
-    local settings = get_settings()
-    if not settings.write_actions_enabled then
-        pcb_stop_raid_manager("live writes were disabled", true)
-        return
-    end
-
-    local action = downed_worker ~= nil and "replace" or
-        (#deployment.empty_slots > 0 and "deploy" or "")
-    if action == "" then
-        return
-    end
-
-    local queue_count_before_take = #raid_manager.reserves
-    local reserve = pcb_take_healthy_raid_reserve()
-    if reserve == nil then
-        if queue_count_before_take > 0 then
-            pcb_rebuild_raid_queue("exhausted")
-        end
-        raid_manager.phase_status = "waiting_for_healthy_reserves"
-        return
-    end
-
-    raid_manager.sequence = raid_manager.sequence + 1
-    local success = false
-    local message = ""
-    local details = {}
-    if action == "replace" then
-        success, message, details = pcb_swap_raid_pal({
-            base_id = raid_manager.base_id,
-            downed_pal_id = downed_worker.pal_id,
-            reserve_pal_id = reserve.pal_id,
-            reserve_page = reserve.page,
-            reserve_index = reserve.index,
-        }, false)
-    else
-        success, message, details = pcb_deploy_raid_pal(
-            raid_manager.base_id,
-            reserve,
-            false
-        )
-    end
-    if success then
-        if action == "deploy" then
-            raid_manager.deployment_count =
-                raid_manager.deployment_count + 1
-        end
-        append_audit(
-            "completed",
-            action == "replace" and
-                "raid_manager_replace" or
-                "raid_manager_deploy",
-            "raid-auto-" .. tostring(raid_manager.sequence),
-            action == "replace" and
-                (downed_worker.pal_id .. " -> " .. reserve.pal_id) or
-                reserve.pal_id
-        )
-        if action == "replace" then
-            action_notification(
-                true,
-                "PalCom: replaced a downed raid Pal with level " ..
-                    tostring(reserve.level) .. "."
-            )
-        end
-        if #raid_manager.reserves == 0 then
-            pcb_rebuild_raid_queue("exhausted")
-        end
-        raid_manager.tick_count = 0
-    else
-        append_audit(
-            "failed",
-            action == "replace" and
-                "raid_manager_replace" or
-                "raid_manager_deploy",
-            "raid-auto-" .. tostring(raid_manager.sequence),
-            message
-        )
-        if details ~= nil and
-            details.data_candidate_invalid == "true" then
-            pcb_invalidate_raid_reserve(reserve, message)
-            if #raid_manager.reserves == 0 then
-                pcb_rebuild_raid_queue("exhausted")
-            end
-            raid_manager.phase_status =
-                "skipped_blocked_reserve"
-        else
-            pcb_stop_raid_manager(message, true)
-        end
-    end
-end
-
-pcb_stop_raid_manager = function(reason, notify)
-    raid_manager.mode = "off"
-    raid_manager.stopped_reason = tostring(reason or "stopped")
-    raid_manager.base_id = ""
-    raid_manager.base_name = ""
-    raid_manager.fighter_count = 0
-    raid_manager.reserve_count = 0
-    raid_manager.healthy_palbox_count = 0
-    raid_manager.palbox_occupied_count = 0
-    raid_manager.deployment_capacity = 0
-    raid_manager.deployed_count = 0
-    raid_manager.auto_deployable_count = 0
-    raid_manager.queue_built_at_ms = 0
-    raid_manager.queue_rebuild_count = 0
-    raid_manager.queue_rebuild_reason = ""
-    raid_manager.invalidated_reserves = {}
-    raid_manager.invalidated_reserve_count = 0
-    raid_manager.started_at_ms = 0
-    raid_manager.last_check_at_ms = 0
-    raid_manager.downed_count = 0
-    raid_manager.manager_state = ""
-    raid_manager.reinforcement_pass_requested = false
-    raid_manager.reinforcement_request_reason = ""
-    raid_manager.reinforcement_pass_running = false
-    raid_manager.raid_phase_missing_samples = 0
-    raid_manager.raid_phase_seen_battle = false
-    raid_manager.raid_phase_state = ""
-    raid_manager.next_bulk_deploy_at_ms = 0
-    raid_manager.zero_healthy_warned = false
-    raid_manager.reserves = {}
-    raid_fighter_cache = nil
-    if notify then
-        display_notification(
-            "PalCom: Raid Manager stopped - " ..
-                raid_manager.stopped_reason .. ".",
-            1
+    raid_manager.raid_phase_missing_samples =
+        raid_manager.raid_phase_missing_samples + 1
+    if raid_manager.raid_phase_missing_samples >= 2 then
+        pcb_stop_raid_manager(
+            "raid instance disappeared after battle",
+            true
         )
     end
 end
@@ -6273,9 +4546,9 @@ local function pcb_warn_no_healthy_reserves()
         return
     end
     raid_manager.zero_healthy_warned = true
-    raid_manager.manager_state = "waiting_for_healthy_reserves"
-    action_notification(
-        false,
+    raid_manager.manager_state = MANAGER_STATE_WAITING
+    notify(
+        "warning",
         "PalCom: Raid Manager has no healthy Palbox Pals left."
     )
 end
@@ -6292,13 +4565,6 @@ local function pcb_run_base_reinforcement_pass(reason)
         pcb_raid_deployment_state(raid_manager.base_id)
     raid_manager.deployment_capacity = deployment.capacity
     raid_manager.deployed_count = deployment.deployed
-    raid_manager.fighter_count = deployment.deployed
-    raid_manager.auto_deployable_count =
-        deployment.automatic_available and
-            math.min(
-                #raid_manager.reserves,
-                #deployment.empty_slots
-            ) or 0
     if not is_valid(deployment.container) then
         raid_manager.reinforcement_pass_running = false
         pcb_stop_raid_manager(
@@ -6329,12 +4595,11 @@ local function pcb_run_base_reinforcement_pass(reason)
             end
         end
     end
-    raid_manager.downed_count = #downed
     if raid_manager.mode ~= "auto" then
         raid_manager.reinforcement_pass_running = false
         scheduler_metrics.last_reinforcement_pass_ms =
             math.floor((os.clock() - pass_started_at) * 1000)
-        raid_manager.manager_state = "observing"
+        raid_manager.manager_state = MANAGER_STATE_ACTIVE
         return 0, 0
     end
     if not get_settings().write_actions_enabled then
@@ -6397,18 +4662,24 @@ local function pcb_run_base_reinforcement_pass(reason)
         return false
     end
 
+    -- One roster-write budget for the whole pass. A wipe can leave every slot
+    -- downed at once, and replacing them all in a single dispatcher pass would
+    -- make the game reconcile that many actors in one frame. Whatever is left
+    -- over continues on the next wake through the existing coalesced request.
+    local write_budget = math.max(1, CONFIG.raid_bulk_deploy_batch_size)
     for _, fighter in ipairs(downed) do
-        if raid_manager.mode == "off" or
+        if write_budget <= 0 or raid_manager.mode == "off" or
             not use_reserve("replace", fighter) then
             break
         end
         replacements = replacements + 1
+        write_budget = write_budget - 1
     end
     if raid_manager.mode ~= "off" then
         local bulk_deployment_count = math.min(
             #deployment.empty_slots,
             #raid_manager.reserves,
-            CONFIG.raid_bulk_deploy_batch_size
+            write_budget
         )
         for index = 1, bulk_deployment_count do
             local empty_slot = deployment.empty_slots[index]
@@ -6429,7 +4700,6 @@ local function pcb_run_base_reinforcement_pass(reason)
     end
     raid_manager.deployment_count =
         raid_manager.deployment_count + deployments
-    raid_manager.reserve_count = #raid_manager.reserves
     if reserve_count_at_start > 0 and
         #raid_manager.reserves == 0 then
         pcb_rebuild_raid_queue("exhausted")
@@ -6438,21 +4708,17 @@ local function pcb_run_base_reinforcement_pass(reason)
         pcb_raid_deployment_state(raid_manager.base_id)
     raid_manager.deployment_capacity = refreshed.capacity
     raid_manager.deployed_count = refreshed.deployed
-    raid_manager.fighter_count = refreshed.deployed
-    raid_manager.auto_deployable_count =
-        refreshed.automatic_available and
-            math.min(
-                #raid_manager.reserves,
-                #refreshed.empty_slots
-            ) or 0
+    -- Either kind of leftover work continues the same way: downed fighters the
+    -- write budget did not reach, or empty slots still waiting on a reserve.
+    local replacements_pending = replacements < #downed
     local bulk_deployment_pending =
         raid_manager.mode ~= "off" and
-        #refreshed.empty_slots > 0 and
-        #raid_manager.reserves > 0
+        #raid_manager.reserves > 0 and
+        (#refreshed.empty_slots > 0 or replacements_pending)
     if bulk_deployment_pending then
         -- Continue on the next existing 500 ms dispatcher wakeup. Each batch
-        -- stages N-1 roster swaps and performs one authoritative worker move,
-        -- limiting how many actors the game reconciles in a single frame.
+        -- performs one authoritative worker move, limiting how many actors the
+        -- game reconciles in a single frame.
         raid_manager.reinforcement_pass_requested = true
         raid_manager.reinforcement_request_reason =
             "bulk-deployment-continuation"
@@ -6465,13 +4731,14 @@ local function pcb_run_base_reinforcement_pass(reason)
         pcb_warn_no_healthy_reserves()
     elseif raid_manager.mode ~= "off" then
         raid_manager.zero_healthy_warned = false
-        raid_manager.manager_state = "active"
+        raid_manager.manager_state = bulk_deployment_pending and
+            MANAGER_STATE_DEPLOYING or MANAGER_STATE_ACTIVE
     end
     if replacements > 0 and
         not bulk_deployment_pending and
         not raid_manager.zero_healthy_warned then
-        action_notification(
-            true,
+        notify(
+            "normal",
             "PalCom: Raid Manager " ..
                 tostring(reason or "check") .. " deployed " ..
                 tostring(deployments) .. " and replaced " ..
@@ -6487,7 +4754,7 @@ end
 -- Raid Manager is intentionally a generic, base-bound reinforcement manager.
 -- Activation is the only current-base lookup. Events request immediate,
 -- coalesced passes; the periodic path is a one-minute integrity fallback.
-pcb_set_raid_manager = function(command, dry_run)
+local function pcb_set_raid_manager(command, dry_run)
     local mode = string.lower(tostring(command.mode or ""))
     if mode ~= "off" and mode ~= "observe" and mode ~= "auto" then
         return false, "mode must be off, observe, or auto.", {}
@@ -6495,7 +4762,7 @@ pcb_set_raid_manager = function(command, dry_run)
     if mode == "off" then
         if not dry_run then
             pcb_stop_raid_manager("stopped by player", false)
-            action_notification(true, "PalCom: Raid Manager stopped.")
+            notify("normal", "PalCom: Raid Manager stopped.")
         end
         return true,
             dry_run and
@@ -6568,43 +4835,29 @@ pcb_set_raid_manager = function(command, dry_run)
             details
     end
 
+    -- Start from the same baseline every stop leaves behind, then apply the
+    -- live activation values. A new session also zeroes the cumulative
+    -- counters that a stop deliberately preserves.
+    pcb_reset_raid_manager_state()
     raid_manager.mode = mode
     raid_manager.base_id = base_id
-    raid_manager.base_name = base_name
     raid_manager.stopped_reason = ""
-    raid_manager.fighter_count = deployment.deployed
-    raid_manager.downed_count = 0
     raid_manager.replacement_count = 0
     raid_manager.deployment_count = 0
-    raid_manager.tick_count = 0
     raid_manager.sequence = 0
-    raid_manager.manager_state =
-        mode == "auto" and "active" or "observing"
-    raid_manager.reinforcement_pass_requested = false
-    raid_manager.reinforcement_request_reason = ""
-    raid_manager.reinforcement_pass_running = false
-    raid_manager.raid_phase_missing_samples = 0
-    raid_manager.raid_phase_seen_battle = false
-    raid_manager.raid_phase_state = ""
-    raid_manager.next_bulk_deploy_at_ms = 0
-    raid_manager.invalidated_reserves = {}
-    raid_manager.invalidated_reserve_count = 0
+    raid_manager.manager_state = MANAGER_STATE_ACTIVE
     raid_manager.reserves = reserves
-    raid_manager.reserve_count = #reserves
     raid_manager.healthy_palbox_count =
         tonumber(reserve_diagnostics.healthy) or #reserves
     raid_manager.palbox_occupied_count =
         tonumber(reserve_diagnostics.occupied) or 0
     raid_manager.deployment_capacity = deployment.capacity
     raid_manager.deployed_count = deployment.deployed
-    raid_manager.auto_deployable_count =
-        math.min(#reserves, #deployment.empty_slots)
     raid_manager.queue_built_at_ms = now_ms()
     raid_manager.queue_rebuild_count = 1
     raid_manager.queue_rebuild_reason = "activation"
     raid_manager.started_at_ms = now_ms()
     raid_manager.last_check_at_ms = raid_manager.started_at_ms
-    raid_manager.zero_healthy_warned = false
 
     local deployed_now = 0
     local replaced_now = 0
@@ -6644,8 +4897,8 @@ pcb_set_raid_manager = function(command, dry_run)
     details.data_expected_fighter_queue_count =
         tostring(#raid_manager.reserves)
     if not raid_manager.zero_healthy_warned then
-        action_notification(
-            true,
+        notify(
+            "normal",
             mode == "auto" and
                 "PalCom: Raid Manager active for " ..
                     base_name .. "." or
@@ -6656,13 +4909,52 @@ pcb_set_raid_manager = function(command, dry_run)
     return true, "Raid Manager activated for the current base.", details
 end
 
-pcb_get_raid_state = function(command)
+-- Reflection dumps for the reserve, raid, and combat surfaces. These are
+-- diagnostic only: every caller pays a full class walk, so they are emitted
+-- exclusively for an explicit include_probe request.
+local function pcb_raid_probe_fields(raid_context, first_individual)
+    return {
+        data_raid_area_objects =
+            table.concat(pcb_raid_area_object_probe(), "|"),
+        data_raid_metadata_surface =
+            table.concat(pcb_raid_metadata_surface(), "|"),
+        data_raid_module_declared = table.concat(
+            declared_function_surface(raid_context.module),
+            "|"
+        ),
+        data_palbox_metadata_surface =
+            table.concat(pcb_palbox_metadata_surface(), "|"),
+        data_surface_probe = table.concat(
+            pcb_combat_surface("fighter.individual", first_individual),
+            "|"
+        ),
+    }
+end
+
+local function pcb_get_raid_state(command)
+    local include_probe =
+        tostring(command.include_probe or "false") == "true"
+    local include_reserves =
+        tostring(command.include_reserves or "false") == "true"
     local context = player_context(true, false)
     local base_id = tostring(context.data_current_base_id or "")
     local owned = context.data_current_base_is_owned == "true"
     local deployment = pcb_raid_deployment_state(base_id)
+    -- Scanning the Palbox is the most expensive read this command can make.
+    -- A running manager already maintains an authoritative queue, so rescan
+    -- only when asked or when no queue exists to report.
+    local scan_reserves =
+        include_reserves or raid_manager.mode == "off"
     local diagnostics = {}
-    local reserves = pcb_collect_raid_reserves(diagnostics)
+    local reserves = raid_manager.reserves
+    local healthy_count = raid_manager.healthy_palbox_count
+    local occupied_count = raid_manager.palbox_occupied_count
+    if scan_reserves then
+        reserves = pcb_collect_raid_reserves(diagnostics)
+        healthy_count = tonumber(diagnostics.healthy) or #reserves
+        occupied_count = tonumber(diagnostics.occupied) or 0
+    end
+    local first_individual = nil
     local fighters = {}
     local downed_count = 0
     if is_valid(deployment.container) then
@@ -6677,6 +4969,7 @@ pcb_get_raid_state = function(command)
                 if combat.downed_known and combat.downed then
                     downed_count = downed_count + 1
                 end
+                first_individual = first_individual or individual
                 table.insert(fighters, {
                     character_id = character_id,
                     downed = combat.downed,
@@ -6719,7 +5012,7 @@ pcb_get_raid_state = function(command)
         math.max(0, now_ms() - raid_manager.started_at_ms) or 0
     local raid_instance, _, _, raid_context =
         pcb_raid_area_roster(base_id)
-    return true, "Current base reinforcement state inspected.", {
+    local fields = {
         data_base_id = base_id,
         data_base_name =
             tostring(context.data_current_base_name or ""),
@@ -6738,13 +5031,16 @@ pcb_get_raid_state = function(command)
                 deployment.automatic_available and
                     math.min(#reserves, #deployment.empty_slots) or 0
             ),
-        data_palbox_healthy_count =
-            tostring(diagnostics.healthy or #reserves),
-        data_palbox_occupied_count =
-            tostring(diagnostics.occupied or 0),
+        data_palbox_healthy_count = tostring(healthy_count),
+        data_palbox_occupied_count = tostring(occupied_count),
         data_reserves = table.concat(reserve_records, "|"),
+        data_reserves_live = scan_reserves and "true" or "false",
         data_reserves_truncated =
             #reserves > #reserve_records and "true" or "false",
+        data_deployment_count =
+            tostring(raid_manager.deployment_count),
+        data_replacement_count =
+            tostring(raid_manager.replacement_count),
         data_manager_mode = raid_manager.mode,
         data_manager_status = raid_manager.manager_state,
         data_manager_stopped_reason = raid_manager.stopped_reason,
@@ -6768,9 +5064,20 @@ pcb_get_raid_state = function(command)
             tostring(raid_manager.queue_rebuild_count),
         data_expected_fighter_queue_rebuild_interval_ms =
             tostring(CONFIG.raid_queue_rebuild_interval_ms),
+        data_expected_fighter_queue_last_reason =
+            raid_manager.queue_rebuild_reason,
         data_expected_fighter_queue_invalidated_count =
             tostring(raid_manager.invalidated_reserve_count),
     }
+    if include_probe then
+        add_fields(
+            fields,
+            pcb_raid_probe_fields(raid_context, first_individual)
+        )
+        fields.data_reserve_probe =
+            table.concat(diagnostics.samples or {}, "|")
+    end
+    return true, "Current base reinforcement state inspected.", fields
 end
 
 local function request_reinforcement_pass(reason)
@@ -6790,7 +5097,7 @@ local function request_reinforcement_pass(reason)
         tostring(reason or "event")
 end
 
-pcb_raid_manager_tick = function()
+local function pcb_raid_manager_tick()
     if raid_manager.mode == "off" then
         return
     end
@@ -6822,7 +5129,6 @@ pcb_raid_manager_tick = function()
         return
     end
     raid_manager.last_check_at_ms = current_ms
-    raid_manager.tick_count = raid_manager.tick_count + 1
     if queue_due then
         pcb_rebuild_raid_queue("periodic")
         if #raid_manager.reserves > 0 then
@@ -6839,7 +5145,14 @@ pcb_raid_manager_tick = function()
     local reason = event_requested and
         raid_manager.reinforcement_request_reason or
         (queue_due and "queue-refresh" or "integrity")
-    pcb_run_base_reinforcement_pass(reason)
+    local deployments, replacements =
+        pcb_run_base_reinforcement_pass(reason)
+    -- Work found by a periodic pass is work the event hooks did not request.
+    -- Counting it is what tells us whether the fallback can eventually go.
+    if not event_requested and (deployments > 0 or replacements > 0) then
+        scheduler_metrics.reinforcement_integrity_effective =
+            scheduler_metrics.reinforcement_integrity_effective + 1
+    end
 end
 
 function pcb_move_pal_roster(command, dry_run)
@@ -6906,7 +5219,7 @@ function pcb_move_pal_roster(command, dry_run)
             "Companion: Pal is already assigned to " .. base_label .. "." or
             "Companion: Pal is already in the Palbox."
         if not dry_run then
-            action_notification(true, text)
+            notify("normal", text)
         end
         return true, "Pal is already in the requested roster.", {
             data_already_there = "true",
@@ -6942,28 +5255,14 @@ function pcb_move_pal_roster(command, dry_run)
         target_slot_id = target.slot:GetSlotId()
     end)
     if source_slot_id == nil or target_slot_id == nil then
-        action_notification(false, "Companion: roster move failed; slot IDs unavailable.")
+        notify("warning", "Companion: roster move failed; slot IDs unavailable.")
         return false, "Source or target slot ID is unavailable.", {}
     end
 
-    local base_container_id = nil
-    local palbox_container = nil
-    local palbox_container_id = nil
-    local native_base_id = nil
-    local palbox_map_object_id = nil
-    local palbox_map_object = ""
-    pcall(function()
-        base_container_id = container:GetId()
-        palbox_container = unwrap(storage.TargetContainer)
-        palbox_container_id = palbox_container:GetId()
-        native_base_id = model:GetId()
-    end)
-    palbox_map_object_id, palbox_map_object =
-        pcb_base_palbox_map_object_id(base_id, model)
-    if base_container_id == nil or palbox_container_id == nil or
-        native_base_id == nil or palbox_map_object_id == nil then
-        action_notification(
-            false,
+    local identity = pcb_worker_move_identity(base_id, model, container)
+    if identity == nil then
+        notify(
+            "warning",
             "Companion: roster move failed; base identity unavailable."
         )
         return false, "Base, Palbox, or map-object identity is unavailable.", {}
@@ -6971,42 +5270,29 @@ function pcb_move_pal_roster(command, dry_run)
 
     -- Match the Palbox UI's authoritative move operation. Swapping with an
     -- empty slot updates storage but bypasses the worker spawn lifecycle.
-    local request_method = ""
-    local request_ok = false
-    local request_error = ""
-    if direction == "to_base" then
-        request_ok, request_error = pcall(function()
-            base_network:RequestMoveCharacterToWorker_ToServer(
-                native_base_id,
-                source_slot_id,
-                base_container_id,
-                palbox_map_object_id
-            )
-        end)
-        request_method =
-            "RequestMoveCharacterToWorker_ToServer"
+    local to_base = direction == "to_base"
+    local request_method = to_base and
+        "RequestMoveCharacterToWorker_ToServer" or
+        "RequestMoveWorkerToPalBox_ToServer"
+    local request_ok, request_error
+    if to_base then
+        request_ok, request_error =
+            pcb_request_worker_deploy(identity, source_slot_id)
     else
-        request_ok, request_error = pcall(function()
-            base_network:RequestMoveWorkerToPalBox_ToServer(
-                native_base_id,
-                source_slot_id,
-                target.page,
-                palbox_map_object_id
-            )
-        end)
-        request_method =
-            "RequestMoveWorkerToPalBox_ToServer"
+        request_ok, request_error = pcb_request_worker_withdraw(
+            identity,
+            source_slot_id,
+            target.page
+        )
     end
     local target_pal_id = pcb_slot_identity(target.slot)
-    local source_pal_id = pcb_slot_identity(source.slot)
-    local verified = request_ok and
-        target_pal_id == pal_id and source_pal_id ~= pal_id
-    if verified then
-        local text = direction == "to_base" and
+    if request_ok and
+        pcb_move_verified(source.slot, target.slot, pal_id) then
+        local text = to_base and
             "Companion: moved Pal into " .. base_label .. "'s roster." or
             "Companion: moved Pal from " .. base_label .. " to the Palbox."
         local displayed, notification_error =
-            action_notification(true, text)
+            notify("normal", text)
         return true, "Roster move applied and verified.", {
             data_base_id = base_id,
             data_direction = direction,
@@ -7014,7 +5300,7 @@ function pcb_move_pal_roster(command, dry_run)
                 displayed and "true" or "false",
             data_notification_error = notification_error or "",
             data_pal_id = pal_id,
-            data_palbox_map_object = palbox_map_object,
+            data_palbox_map_object = identity.palbox_map_object,
             data_request_method = request_method,
             data_source = source_location,
             data_target = target_location,
@@ -7025,31 +5311,25 @@ function pcb_move_pal_roster(command, dry_run)
     local rollback_ok = false
     local rollback_error = ""
     if target_pal_id == pal_id then
-        local ok, error_value = pcall(function()
-            if direction == "to_base" then
-                base_network:RequestMoveWorkerToPalBox_ToServer(
-                    native_base_id,
-                    target_slot_id,
-                    source.page,
-                    palbox_map_object_id
-                )
-            else
-                base_network:RequestMoveCharacterToWorker_ToServer(
-                    native_base_id,
-                    target_slot_id,
-                    base_container_id,
-                    palbox_map_object_id
-                )
-            end
-        end)
+        local ok, error_value
+        if to_base then
+            ok, error_value = pcb_request_worker_withdraw(
+                identity,
+                target_slot_id,
+                source.page
+            )
+        else
+            ok, error_value =
+                pcb_request_worker_deploy(identity, target_slot_id)
+        end
         rollback_ok = ok and
             pcb_slot_identity(source.slot) == pal_id
         if not ok then
             rollback_error = tostring(error_value)
         end
     end
-    action_notification(
-        false,
+    notify(
+        "warning",
         rollback_ok and
             "Companion: roster move failed; previous roster restored." or
             "Companion: roster move failed; rollback could not be verified."
@@ -7692,38 +5972,7 @@ local function refresh_bridge_readiness()
             full_name(raid_context.phase_state)
         raid_detection_state.state_machine =
             full_name(raid_context.state_machine)
-        if raid_manager.mode ~= "off" then
-            raid_manager.raid_phase_state =
-                raid_detection_state.phase_state
-            local phase_is_battle = string.find(
-                raid_detection_state.phase_state,
-                "PalRaidBossAreaPhaseBattleState",
-                1,
-                true
-            ) ~= nil
-            if phase_is_battle then
-                raid_manager.raid_phase_seen_battle = true
-                raid_manager.raid_phase_missing_samples = 0
-            elseif is_valid(instance) and
-                is_valid(raid_context.phase_state) then
-                raid_manager.raid_phase_missing_samples = 0
-                if raid_manager.raid_phase_seen_battle then
-                    pcb_stop_raid_manager(
-                        "raid battle phase ended",
-                        true
-                    )
-                end
-            elseif raid_manager.raid_phase_seen_battle then
-                raid_manager.raid_phase_missing_samples =
-                    raid_manager.raid_phase_missing_samples + 1
-                if raid_manager.raid_phase_missing_samples >= 2 then
-                    pcb_stop_raid_manager(
-                        "raid instance disappeared after battle",
-                        true
-                    )
-                end
-            end
-        end
+        pcb_observe_raid_phase(instance, raid_context)
     end
     if not bridge_readiness.game_ready then
         scheduler_metrics.readiness_failures =
@@ -7760,6 +6009,9 @@ local function write_heartbeat()
         enabled = settings.enabled and "true" or "false",
         game_ready =
             bridge_readiness.game_ready and "true" or "false",
+        readiness_controller_available =
+            bridge_readiness.controller_available and "true" or "false",
+        readiness_world_key = bridge_readiness.world_key,
         readiness_age_ms = tostring(readiness_age_ms),
         readiness_refresh_interval_ms =
             tostring(CONFIG.readiness_refresh_interval_ms),
@@ -7838,6 +6090,10 @@ local function write_heartbeat()
             tostring(scheduler_metrics.reinforcement_event_requests),
         scheduler_reinforcement_integrity_passes =
             tostring(scheduler_metrics.reinforcement_integrity_passes),
+        scheduler_reinforcement_integrity_effective =
+            tostring(scheduler_metrics.reinforcement_integrity_effective),
+        scheduler_last_queue_build_ms =
+            tostring(scheduler_metrics.last_queue_build_ms),
         scheduler_reinforcement_hooks_installed =
             tostring(scheduler_metrics.reinforcement_hooks_installed),
         scheduler_roster_scans =
