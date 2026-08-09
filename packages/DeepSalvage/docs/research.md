@@ -17,6 +17,25 @@ an unmodded remote client's minigame. If it does not, server-only difficulty is
 not viable through this Lua surface and must fail closed; server-authoritative
 reward modification remains viable.
 
+## Notification ownership
+
+`UPalLogManager` is a per-process UI manager, not a replicated actor.
+`FindFirstOf("PalLogManager")` on a listen server therefore always resolves the
+host's own HUD, which made every player's activation notification appear on the
+host instead of on the player who was fishing.
+
+Delivery is now bound to the attempt's player controller. `IsLocalController()`
+is the discriminator, matching the Companion Bridge finding that
+`FindFirstOf("PalPlayerController")` can select a remote listen-server player.
+
+Reaching an unmodded remote client requires a replicated channel. The only
+candidate that does not add a new RPC surface is a whisper through
+`PalGameStateInGame:BroadcastChatMessage` with `FPalChatMessage.ReceiverPlayerUId`
+set to the salvaging player. That path is implemented but disabled by default:
+the `EPalChatCategory` value for whisper is not verified against a live build,
+and a wrong category would broadcast to every player. It fails closed when the
+receiver id or the game state cannot be resolved.
+
 ## Reward stacking
 
 Palworld exposes the Jellroy fishing-salvage passive through
