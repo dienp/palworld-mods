@@ -97,7 +97,7 @@ $manifest = [ordered]@{
     minimumWindowsVersion = "10.0.17763.0"
     selfContained = $true
     palCalcVersion = "1.19.1"
-    companionBridgeVersion = "0.1.0-dev.88"
+    companionBridgeVersion = "0.1.0-dev.115"
     executable = "palworld-mcp-server.exe"
     sha256 = $archiveHash
 }

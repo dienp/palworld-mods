@@ -1,4 +1,4 @@
-# Palworld Companion Bridge
+# Palworld Companion Bridge (Experimental)
 
 An optional UE4SS Lua bridge that gives the local Palworld MCP server a narrow,
 auditable live-game channel.
@@ -13,6 +13,11 @@ When the local PalCom broker is ready, messages beginning with
 `Hey PalCom,` are intercepted from the local player, suppressed from ordinary
 chat, and answered through private `PalLogManager` notifications. Messages
 from remote players are ignored.
+
+The shorter aliases `PalCom,`, `Pal,`, and `PC,` are enabled by default. All
+prefixes are case-insensitive and retain the comma to reduce accidental
+matches. Configure the list with `palComChatAliases` in
+`palworld-mcp.local.json`.
 
 The broker renews a 15-second readiness lease every five seconds. When that
 lease is absent or stale, the hook suppresses a matching private command,
@@ -30,6 +35,27 @@ command mailbox. The broker uses filesystem events rather than a request
 polling loop. While one answer is pending, Lua checks for its response through
 the existing bridge scheduler with 500 ms, one-second, then two-second backoff;
 it creates no PalCom-specific timer.
+
+### If the broker is offline
+
+Enabling this Lua mod installs the in-game chat hook, but it does not install
+the external `palworld-mcp-server.exe` broker. To enable lazy asynchronous
+startup:
+
+1. Install the Palworld MCP server and copy
+   `palworld-mcp.local.example.json` to `palworld-mcp.local.json` beside the
+   executable.
+2. Set `liveBridgeEnabled` and `palComChatEnabled` to `true`.
+3. Start the normal MCP server once. It provisions
+   `%LOCALAPPDATA%\PalworldCompanionBridge\palcom-bootstrap.pcb` and
+   `palcom-launch.cmd`.
+4. Type `Hey PalCom, <question>`, `PalCom, <question>`, `Pal, <question>`, or
+   `PC, <question>` in local in-game chat. If the broker is not already online,
+   the bridge starts it in the background and queues the question.
+
+For a direct diagnostic, run
+`palworld-mcp-server.exe --palcom-agent`. Its console output reports missing
+configuration, Codex authentication, executable, or model errors.
 
 ## Safety model
 

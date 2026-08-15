@@ -1,14 +1,13 @@
 ﻿{
     "SchemaVersion":  1,
-    "ModName":  "Palworld Companion Bridge (Experimental)",
-    "PackageName":  "PalworldCompanionBridge",
+    "ModName":  "Instant Fishing Salvage",
+    "PackageName":  "FastSalvageFishing",
     "ModType":  "Lua",
     "GamePath":  "",
     "RepakPath":  "",
     "StagingPath":  "work/staging",
     "DistPath":  "dist",
-    "WorkshopItemId":  "3780230789",
-    "RejectUnreferencedLuaFunctions":  true,
+    "WorkshopItemId":  "3780284418",
     "Diagnostics":  {
                         "Enabled":  true,
                         "Notifications":  true,

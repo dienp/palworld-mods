@@ -1,16 +1,17 @@
 ﻿{
-    "ModName":  "Palworld Companion Bridge (Experimental)",
-    "PackageName":  "PalworldCompanionBridge",
+    "ModName":  "Instant Fishing Salvage",
+    "PackageName":  "FastSalvageFishing",
     "Thumbnail":  "thumbnail.png",
-    "Version":  "0.1.0-dev.116",
+    "Version":  "0.1.0-dev.18",
     "DebugMode":  true,
-    "MinRevision":  0,
+    "MinRevision":  82182,
     "Author":  "ptd",
     "Dependencies":  [
-
+                         "UE4SSExperimentalPW"
                      ],
     "Tags":  [
-
+                 "Gameplay",
+                 "Tweaks"
              ],
     "InstallRule":  [
                         {

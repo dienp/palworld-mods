@@ -77,6 +77,22 @@
   `CD1B772C-4F320585-77237784-8FDEDEC1` as not owned via the geometric
   resolver.
 
+## Raid Manager deployment performance
+
+- `0.1.0-dev.116` retains the activated base's roster objects and worker-move
+  identity for the manager session. Each paced deployment now enumerates only
+  the bounded worker container; it must not repeat global base-model, worker-
+  director, or Palbox-terminal discovery unless those cached UObjects become
+  invalid after stream-out.
+- Before this change, a live 47-Pal Raid Area deployment on `0.1.0-dev.113`
+  reported `scheduler_last_reinforcement_pass_ms=1760` while deploying one Pal
+  per pass. Compare the same heartbeat field after installing `dev.116`. The
+  authoritative game spawn can still cost a frame, but the bridge-side lookup
+  overhead should no longer recur for every Pal.
+- Verify a base stream-out and return still recovers through fresh discovery,
+  and confirm the manager either continues against the same base or stops
+  safely if its bound roster is unavailable.
+
 ## Previous live verification
 
 - `0.1.0-dev.64` verified `PalCharacterParameterComponent.GetLevel()`,

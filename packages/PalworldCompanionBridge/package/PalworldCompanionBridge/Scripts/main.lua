@@ -1,5 +1,5 @@
 local MOD_NAME = "PalworldCompanionBridge"
-local MOD_VERSION = "0.1.0-dev.113"
+local MOD_VERSION = "0.1.0-dev.116"
 local PROTOCOL_HEADER = "PALWORLD_COMPANION_BRIDGE/1"
 
 local CONFIG = {
@@ -149,6 +149,10 @@ local raid_manager = {
     next_bulk_deploy_at_ms = 0,
     zero_healthy_warned = false,
     reserves = {},
+    roster_model = nil,
+    roster_director = nil,
+    roster_container = nil,
+    worker_move_identity = nil,
 }
 local base_membership_cache = {
     bases = {},
@@ -4023,6 +4027,10 @@ local function pcb_reset_raid_manager_state()
     raid_manager.next_bulk_deploy_at_ms = 0
     raid_manager.zero_healthy_warned = false
     raid_manager.reserves = {}
+    raid_manager.roster_model = nil
+    raid_manager.roster_director = nil
+    raid_manager.roster_container = nil
+    raid_manager.worker_move_identity = nil
 end
 
 local function pcb_stop_raid_manager(reason, notify_player)
@@ -4061,6 +4069,67 @@ local function pcb_worker_move_identity(base_id, model, container)
         palbox_map_object = palbox_map_object,
         palbox_map_object_id = palbox_map_object_id,
     }
+end
+
+-- A running manager is bound to one already-loaded base. Retain that roster
+-- surface for the session instead of walking every loaded base model and
+-- worker director before and after each individual deployment. UObject
+-- validity is checked on every use; stream-out falls back to one fresh lookup.
+local function pcb_raid_manager_deployment_state()
+    local cached_roster =
+        is_valid(raid_manager.roster_container) and
+        is_valid(raid_manager.roster_director)
+    local deployment
+    if cached_roster then
+        if raid_manager.worker_move_identity == nil or
+            not is_valid(raid_manager.worker_move_identity.base_network) then
+            raid_manager.worker_move_identity = pcb_worker_move_identity(
+                raid_manager.base_id,
+                raid_manager.roster_model,
+                raid_manager.roster_container
+            )
+        end
+        deployment = {
+            automatic_available =
+                is_valid(pcb_player_pal_storage()) and
+                raid_manager.worker_move_identity ~= nil and
+                is_valid(raid_manager.worker_move_identity.base_network),
+            capacity = 0,
+            container = raid_manager.roster_container,
+            deployed = 0,
+            director = raid_manager.roster_director,
+            empty_slots = {},
+            model = raid_manager.roster_model,
+            owner_base_id = raid_manager.base_id,
+            roster_source = "base_worker_roster_cached",
+        }
+        for _, entry in ipairs(
+            pcb_container_slots(raid_manager.roster_container)
+        ) do
+            deployment.capacity = deployment.capacity + 1
+            if is_guid(pcb_slot_identity(entry.slot)) then
+                deployment.deployed = deployment.deployed + 1
+            else
+                table.insert(deployment.empty_slots, entry)
+            end
+        end
+        return deployment
+    end
+
+    deployment = pcb_raid_deployment_state(raid_manager.base_id)
+    raid_manager.roster_model = deployment.model
+    raid_manager.roster_director = deployment.director
+    raid_manager.roster_container = deployment.container
+    raid_manager.worker_move_identity = pcb_worker_move_identity(
+        raid_manager.base_id,
+        deployment.model,
+        deployment.container
+    )
+    deployment.automatic_available =
+        is_valid(pcb_player_pal_storage()) and
+        raid_manager.worker_move_identity ~= nil and
+        is_valid(raid_manager.worker_move_identity.base_network)
+    return deployment
 end
 
 -- The two authoritative worker RPCs. A generic container swap moves the
@@ -4104,19 +4173,24 @@ local function pcb_deploy_raid_pal(
     reserve,
     dry_run,
     requested_target,
-    use_visible_lifecycle
+    use_visible_lifecycle,
+    known_deployment,
+    known_identity
 )
-    local deployment = pcb_raid_deployment_state(base_id)
+    local deployment = known_deployment or pcb_raid_deployment_state(base_id)
     local storage = pcb_player_pal_storage()
-    local network = pcb_live_network_container()
-    local base_network = pcb_live_network_base_camp()
+    local visible_lifecycle = use_visible_lifecycle ~= false
+    local network = visible_lifecycle and nil or pcb_live_network_container()
+    local base_network = known_identity ~= nil and
+        known_identity.base_network or pcb_live_network_base_camp()
     if not deployment.automatic_available or
         not is_valid(deployment.container) then
         return false,
             "The live base deployment surface is unavailable.",
             {}
     end
-    if not is_valid(network) or not is_valid(base_network) then
+    if (visible_lifecycle and not is_valid(base_network)) or
+        (not visible_lifecycle and not is_valid(network)) then
         return false,
             "The live base worker network surface is unavailable.",
             {}
@@ -4166,7 +4240,7 @@ local function pcb_deploy_raid_pal(
         source_slot_id = source.slot:GetSlotId()
         target_slot_id = target.slot:GetSlotId()
     end)
-    local identity = pcb_worker_move_identity(
+    local identity = known_identity or pcb_worker_move_identity(
         base_id,
         deployment.model,
         deployment.container
@@ -4175,7 +4249,6 @@ local function pcb_deploy_raid_pal(
         identity == nil then
         return false, "Base deployment identity is unavailable.", {}
     end
-    local visible_lifecycle = use_visible_lifecycle ~= false
     local request_method = visible_lifecycle and
         "RequestMoveCharacterToWorker_ToServer" or
         "RequestSwap_ToServer_Rep"
@@ -4561,8 +4634,7 @@ local function pcb_run_base_reinforcement_pass(reason)
     raid_manager.reinforcement_pass_requested = false
     raid_manager.reinforcement_request_reason = ""
     local reserve_count_at_start = #raid_manager.reserves
-    local deployment =
-        pcb_raid_deployment_state(raid_manager.base_id)
+    local deployment = pcb_raid_manager_deployment_state()
     raid_manager.deployment_capacity = deployment.capacity
     raid_manager.deployed_count = deployment.deployed
     if not is_valid(deployment.container) then
@@ -4637,7 +4709,9 @@ local function pcb_run_base_reinforcement_pass(reason)
                     reserve,
                     false,
                     target,
-                    use_visible_lifecycle
+                    use_visible_lifecycle,
+                    deployment,
+                    raid_manager.worker_move_identity
                 )
             end
             append_audit(
@@ -4704,8 +4778,7 @@ local function pcb_run_base_reinforcement_pass(reason)
         #raid_manager.reserves == 0 then
         pcb_rebuild_raid_queue("exhausted")
     end
-    local refreshed =
-        pcb_raid_deployment_state(raid_manager.base_id)
+    local refreshed = pcb_raid_manager_deployment_state()
     raid_manager.deployment_capacity = refreshed.capacity
     raid_manager.deployed_count = refreshed.deployed
     -- Either kind of leftover work continues the same way: downed fighters the
@@ -4858,6 +4931,14 @@ local function pcb_set_raid_manager(command, dry_run)
     raid_manager.queue_rebuild_reason = "activation"
     raid_manager.started_at_ms = now_ms()
     raid_manager.last_check_at_ms = raid_manager.started_at_ms
+    raid_manager.roster_model = deployment.model
+    raid_manager.roster_director = deployment.director
+    raid_manager.roster_container = deployment.container
+    raid_manager.worker_move_identity = pcb_worker_move_identity(
+        base_id,
+        deployment.model,
+        deployment.container
+    )
 
     local deployed_now = 0
     local replaced_now = 0
@@ -5472,14 +5553,39 @@ local function palcom_bootstrap()
     return bootstrap
 end
 
-local function palcom_prefix()
+local function palcom_prefixes()
     local status = palcom_status(false)
     local prefix = status and palcom_trim(status.prefix) or ""
-    if prefix == "" then
+    local aliases = status and tostring(status.aliases or "") or ""
+    if prefix == "" or aliases == "" then
         local bootstrap = palcom_bootstrap()
-        prefix = bootstrap and palcom_trim(bootstrap.prefix) or ""
+        if prefix == "" then
+            prefix = bootstrap and palcom_trim(bootstrap.prefix) or ""
+        end
+        if aliases == "" then
+            aliases = bootstrap and tostring(bootstrap.aliases or "") or ""
+        end
     end
-    return prefix ~= "" and prefix or "Hey PalCom,"
+    prefix = prefix ~= "" and prefix or "Hey PalCom,"
+
+    local prefixes = {}
+    local seen = {}
+    local function add_prefix(value)
+        value = palcom_trim(value)
+        local key = string.lower(value)
+        if value ~= "" and not seen[key] then
+            seen[key] = true
+            table.insert(prefixes, value)
+        end
+    end
+    add_prefix(prefix)
+    for alias in string.gmatch(aliases, "[^\r\n]+") do
+        add_prefix(alias)
+    end
+    table.sort(prefixes, function(left, right)
+        return string.len(left) > string.len(right)
+    end)
+    return prefixes
 end
 
 local function palcom_private_message(speaker, message, priority)
@@ -5551,6 +5657,41 @@ local function start_palcom_broker()
         return false, "the launcher command failed"
     end
     return true, "startup requested"
+end
+
+local function palcom_start_failure_message(start_message)
+    if start_message == "the PalCom launcher has not been provisioned" then
+        return
+            "PalCom setup is incomplete: no broker launcher was provisioned. " ..
+            "In palworld-mcp.local.json, set liveBridgeEnabled=true and " ..
+            "palComChatEnabled=true, then start the normal " ..
+            "palworld-mcp-server once. This creates " ..
+            "%LOCALAPPDATA%\\PalworldCompanionBridge\\palcom-launch.cmd. " ..
+            "See 'Private in-game PalCom chat' in the server README."
+    end
+    if start_message ==
+        "automatic startup is disabled in bridge-settings.pcb" then
+        return
+            "The PalCom broker is offline because automatic startup is " ..
+            "disabled in bridge-settings.pcb. Start " ..
+            "palworld-mcp-server.exe --palcom-agent manually, or set " ..
+            "palcom_lazy_start_enabled=true and try again."
+    end
+    if start_message == "the provisioned PalCom launcher is invalid" then
+        return
+            "PalCom setup is invalid: the provisioned broker launcher is " ..
+            "unsafe or malformed. Start the normal palworld-mcp-server once " ..
+            "to recreate palcom-launch.cmd, then try again."
+    end
+    if start_message == "the launcher command failed" then
+        return
+            "PalCom could not run its broker launcher. Start " ..
+            "palworld-mcp-server.exe --palcom-agent manually and check its " ..
+            "console output for the startup error."
+    end
+    return
+        "The PalCom broker is offline and could not be started: " ..
+        tostring(start_message) .. "."
 end
 
 local function submit_palcom_request(message, broker_start_deadline_at_ms)
@@ -5780,16 +5921,20 @@ local function install_palcom_chat_hook()
             end
 
             local raw_message = palcom_trim(name_string(message))
-            local prefix = palcom_prefix()
-            if string.sub(
-                string.lower(raw_message),
-                1,
-                string.len(prefix)
-            ) ~= string.lower(prefix) then
+            local matched_prefix = nil
+            local lower_message = string.lower(raw_message)
+            for _, prefix in ipairs(palcom_prefixes()) do
+                if string.sub(lower_message, 1, string.len(prefix)) ==
+                    string.lower(prefix) then
+                    matched_prefix = prefix
+                    break
+                end
+            end
+            if matched_prefix == nil then
                 return
             end
             local prompt = palcom_trim(
-                string.sub(raw_message, string.len(prefix) + 1)
+                string.sub(raw_message, string.len(matched_prefix) + 1)
             )
             if prompt == "" then
                 return
@@ -5822,8 +5967,7 @@ local function install_palcom_chat_hook()
                 if not started then
                     palcom_private_message(
                         "PalCom",
-                        "The broker is offline and could not be started: " ..
-                            tostring(start_message) .. ".",
+                        palcom_start_failure_message(start_message),
                         3
                     )
                     append_audit(

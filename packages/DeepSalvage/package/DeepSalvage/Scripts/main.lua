@@ -1,5 +1,5 @@
-local MOD_NAME = "DeepSalvage"
-local MOD_VERSION = "1.0.3"
+local MOD_NAME = "More Fishing Salvage Reward"
+local MOD_VERSION = "1.0.5"
 
 local CONFIG = {
     modifier_chance = 1.0,
@@ -19,8 +19,9 @@ local CONFIG = {
     -- opt-in because it must be validated against the live chat enum.
     remote_notification_via_chat = false,
     remote_notification_chat_category = 4,
-    remote_notification_sender = "Deep Salvage",
+    remote_notification_sender = "More Fishing Salvage Reward",
     notification_cooldown_ms = 2000,
+    notification_display_seconds = 3.0,
 }
 
 local PATHS = {
@@ -159,15 +160,49 @@ end
 
 -- Writes to the log manager owned by the machine running this script. On a
 -- listen server that is the host's own HUD, never a remote client's.
-local function display_local_notification(priority, message)
+local function display_local_notification(priority, message, duration_seconds)
     local displayed = false
     pcall(function()
         if not is_valid(cached_log_manager) then
             cached_log_manager = FindFirstOf("PalLogManager")
         end
         if is_valid(cached_log_manager) then
-            cached_log_manager:AddLog(priority, FText(message), {})
-            displayed = true
+            local duration = math.min(
+                3.0,
+                math.max(0.1, tonumber(duration_seconds) or 3.0)
+            )
+            local original_duration = nil
+            if duration_seconds ~= nil then
+                if priority == 1 then
+                    original_duration =
+                        tonumber(cached_log_manager.normalLogDisplayTime)
+                    cached_log_manager.normalLogDisplayTime = duration
+                elseif priority == 2 then
+                    original_duration =
+                        tonumber(cached_log_manager.importantLogDisplayTime)
+                    cached_log_manager.importantLogDisplayTime = duration
+                elseif priority == 3 then
+                    original_duration =
+                        tonumber(cached_log_manager.veryImportantLogDisplayTime)
+                    cached_log_manager.veryImportantLogDisplayTime = duration
+                end
+            end
+
+            local added = pcall(function()
+                cached_log_manager:AddLog(priority, FText(message), {})
+            end)
+
+            if original_duration ~= nil then
+                if priority == 1 then
+                    cached_log_manager.normalLogDisplayTime = original_duration
+                elseif priority == 2 then
+                    cached_log_manager.importantLogDisplayTime = original_duration
+                elseif priority == 3 then
+                    cached_log_manager.veryImportantLogDisplayTime =
+                        original_duration
+                end
+            end
+            displayed = added
         end
     end)
     return displayed
@@ -185,7 +220,7 @@ local function notify_debug(level, event, fields)
         return
     end
 
-    local summary = {"[Deep Salvage]", tostring(event)}
+    local summary = {"[More Fishing Salvage Reward]", tostring(event)}
     if fields ~= nil then
         for _, field in ipairs({
             "selected",
@@ -269,8 +304,13 @@ local function find_controller_by_player_id(player_id)
     return nil
 end
 
-local DEEP_SALVAGE_MESSAGE =
-    "[Deep Salvage] Extra Fishing Magnet consumed; enhanced rewards active."
+local TOTAL_REWARD_PERCENT =
+    math.floor((1.0 + CONFIG.reward_bonus) * 100.0 + 0.5)
+local REWARD_ACTIVATION_MESSAGE = string.format(
+    "[More Fishing Salvage Reward] Extra Fishing Magnet used; " ..
+    "successful salvage grants %d%% total reward.",
+    TOTAL_REWARD_PERCENT
+)
 
 -- True only for the player sharing the process with this script, which is the
 -- listen-server host. Every other salvaging player is a remote client.
@@ -392,8 +432,11 @@ local function notify_deep_salvage(attempt)
         return
     end
     if is_local_controller(controller) then
-        local displayed =
-            display_local_notification(2, DEEP_SALVAGE_MESSAGE)
+        local displayed = display_local_notification(
+            2,
+            REWARD_ACTIVATION_MESSAGE,
+            CONFIG.notification_display_seconds
+        )
         log(displayed and "INFO" or "WARN", "deep_salvage_notification", {
             player_id = player_id,
             target = "host",
@@ -412,7 +455,7 @@ local function notify_deep_salvage(attempt)
         return
     end
     local sent, reason =
-        send_remote_chat_notification(controller, DEEP_SALVAGE_MESSAGE)
+        send_remote_chat_notification(controller, REWARD_ACTIVATION_MESSAGE)
     log(sent and "INFO" or "WARN", "deep_salvage_notification", {
         player_id = player_id,
         target = "remote",
@@ -969,7 +1012,6 @@ local function apply_container_reward(attempt, model)
     end
     local jellroy_multiplier, passive_status =
         get_jellroy_multiplier(attempt.controller)
-    local jellroy_bonus = math.max(0.0, jellroy_multiplier - 1.0)
     local comparisons = {}
     local originals = {}
     local changed = 0
@@ -984,9 +1026,10 @@ local function apply_container_reward(attempt, model)
                     local estimated_base = round_quantity(
                         vanilla_after_jellroy / jellroy_multiplier
                     )
+                    local deep_before_jellroy =
+                        estimated_base * (1.0 + CONFIG.reward_bonus)
                     local expected = round_quantity(
-                        estimated_base *
-                        (1.0 + jellroy_bonus + CONFIG.reward_bonus)
+                        deep_before_jellroy * jellroy_multiplier
                     )
                     table.insert(originals, {
                         slot = slot,
@@ -999,10 +1042,10 @@ local function apply_container_reward(attempt, model)
                     end
                     local item = salvage_slot_item_id(slot)
                     local comparison = string.format(
-                        "%s: base %d -> Jellroy %d (x%.2f) -> final %d",
+                        "%s: base %d -> Deep %.2f -> Jellroy x%.2f -> final %d",
                         item,
                         estimated_base,
-                        vanilla_after_jellroy,
+                        deep_before_jellroy,
                         jellroy_multiplier,
                         actual
                     )
@@ -1014,6 +1057,7 @@ local function apply_container_reward(attempt, model)
                         item = item,
                         original_base = estimated_base,
                         vanilla_after_jellroy = vanilla_after_jellroy,
+                        deep_before_jellroy = deep_before_jellroy,
                         jellroy_multiplier =
                             string.format("%.4f", jellroy_multiplier),
                         passive_status = passive_status,
@@ -1305,7 +1349,6 @@ local function apply_random_reward(model, return_value)
 
     local jellroy_multiplier, passive_status =
         get_jellroy_multiplier(attempt.controller)
-    local jellroy_bonus = math.max(0.0, jellroy_multiplier - 1.0)
     local changed = 0
     local formula_matches = true
     local comparisons = {}
@@ -1315,9 +1358,10 @@ local function apply_random_reward(model, return_value)
             local vanilla_after_jellroy = tonumber(item.Num) or 0
             local estimated_base =
                 round_quantity(vanilla_after_jellroy / jellroy_multiplier)
+            local deep_before_jellroy =
+                estimated_base * (1.0 + CONFIG.reward_bonus)
             local expected = round_quantity(
-                estimated_base *
-                (1.0 + jellroy_bonus + CONFIG.reward_bonus)
+                deep_before_jellroy * jellroy_multiplier
             )
             item.Num = expected
             local actual = tonumber(item.Num) or -1
@@ -1325,10 +1369,10 @@ local function apply_random_reward(model, return_value)
             formula_matches = formula_matches and formula_match
             changed = changed + 1
             table.insert(comparisons, string.format(
-                "%s: base %d -> Jellroy %d (x%.2f) -> final %d",
+                "%s: base %d -> Deep %.2f -> Jellroy x%.2f -> final %d",
                 item_static_id(item),
                 estimated_base,
-                vanilla_after_jellroy,
+                deep_before_jellroy,
                 jellroy_multiplier,
                 actual
             ))
@@ -1342,6 +1386,7 @@ local function apply_random_reward(model, return_value)
                     item = item_static_id(item),
                     vanilla_after_jellroy = vanilla_after_jellroy,
                     estimated_base = estimated_base,
+                    deep_before_jellroy = deep_before_jellroy,
                     jellroy_multiplier =
                         string.format("%.4f", jellroy_multiplier),
                     random_bonus =
@@ -1432,19 +1477,19 @@ local function on_inventory_add(inventory, static_item_id, count)
     end
     local jellroy_multiplier, passive_status =
         get_jellroy_multiplier(attempt.controller)
-    local jellroy_bonus = math.max(0.0, jellroy_multiplier - 1.0)
     local estimated_base =
         round_quantity(vanilla_after_jellroy / jellroy_multiplier)
+    local deep_before_jellroy =
+        estimated_base * (1.0 + CONFIG.reward_bonus)
     local expected = round_quantity(
-        estimated_base *
-        (1.0 + jellroy_bonus + CONFIG.reward_bonus)
+        deep_before_jellroy * jellroy_multiplier
     )
     local changed = set_param(count, expected)
     local comparison = string.format(
-        "%s: base %d -> Jellroy %d (x%.2f) -> final %d",
+        "%s: base %d -> Deep %.2f -> Jellroy x%.2f -> final %d",
         name_string(static_item_id),
         estimated_base,
-        vanilla_after_jellroy,
+        deep_before_jellroy,
         jellroy_multiplier,
         expected
     )
@@ -1458,6 +1503,7 @@ local function on_inventory_add(inventory, static_item_id, count)
         item = name_string(static_item_id),
         original_base = estimated_base,
         vanilla_after_jellroy = vanilla_after_jellroy,
+        deep_before_jellroy = deep_before_jellroy,
         jellroy_multiplier = string.format("%.4f", jellroy_multiplier),
         passive_status = passive_status,
         final_after_modifiers = expected,

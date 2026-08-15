@@ -21,6 +21,7 @@ public sealed class PalComBootstrapTests
                 LiveBridgeDirectory = directory,
                 PalComChatEnabled = true,
                 PalComChatPrefix = "Hey TestCom,",
+                PalComChatAliases = ["TestCom,", "TC,"],
                 PalComMcpServerExecutable = executable
             });
 
@@ -29,6 +30,7 @@ public sealed class PalComBootstrapTests
             );
             Assert.AreEqual("true", bootstrap["enabled"]);
             Assert.AreEqual("Hey TestCom,", bootstrap["prefix"]);
+            Assert.AreEqual("TestCom,\nTC,", bootstrap["aliases"]);
             Assert.IsTrue(File.Exists(bootstrap["launcher"]));
         }
         finally

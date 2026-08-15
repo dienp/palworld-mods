@@ -400,7 +400,7 @@ public sealed class PalComChatAgentService(
 
         var startInfo = new ProcessStartInfo
         {
-            FileName = config.PalComCodexExecutable,
+            FileName = ResolveCodexExecutable(config.PalComCodexExecutable),
             WorkingDirectory = workspace,
             UseShellExecute = false,
             RedirectStandardOutput = true,
@@ -480,6 +480,52 @@ public sealed class PalComChatAgentService(
             );
         }
         return stdout;
+    }
+
+    internal static string ResolveCodexExecutable(
+        string configuredExecutable,
+        string? localApplicationData = null
+    )
+    {
+        var configured = Environment.ExpandEnvironmentVariables(
+            configuredExecutable.Trim()
+        );
+        if (Path.IsPathRooted(configured) ||
+            !string.Equals(
+                Path.GetFileName(configured),
+                configured,
+                StringComparison.Ordinal
+            ))
+        {
+            return Path.GetFullPath(configured);
+        }
+
+        if (string.Equals(configured, "codex", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(configured, "codex.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            var localRoot = string.IsNullOrWhiteSpace(localApplicationData)
+                ? Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData
+                )
+                : localApplicationData;
+            var desktopBin = Path.Combine(localRoot, "OpenAI", "Codex", "bin");
+            if (Directory.Exists(desktopBin))
+            {
+                var desktopCli = Directory
+                    .EnumerateFiles(
+                        desktopBin,
+                        "codex.exe",
+                        SearchOption.AllDirectories
+                    )
+                    .OrderByDescending(File.GetLastWriteTimeUtc)
+                    .FirstOrDefault();
+                if (desktopCli != null)
+                {
+                    return desktopCli;
+                }
+            }
+        }
+        return configured;
     }
 
     private void AddPalworldMcpArguments(ProcessStartInfo startInfo)
@@ -645,6 +691,7 @@ public sealed class PalComChatAgentService(
         {
             ["ready"] = ready ? "true" : "false",
             ["prefix"] = config.PalComChatPrefix,
+            ["aliases"] = string.Join("\n", config.PalComChatAliases ?? []),
             ["lease_until_epoch_ms"] = ready
                 ? DateTimeOffset.UtcNow.Add(LeaseDuration).ToUnixTimeMilliseconds().ToString()
                 : "0",

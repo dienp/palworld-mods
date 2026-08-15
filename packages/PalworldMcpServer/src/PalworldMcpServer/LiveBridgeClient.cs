@@ -657,7 +657,8 @@ public sealed partial class LiveBridgeClient
             {
                 ["enabled"] = enabled ? "true" : "false",
                 ["launcher"] = enabled ? palComLauncherPath : "",
-                ["prefix"] = config.PalComChatPrefix
+                ["prefix"] = config.PalComChatPrefix,
+                ["aliases"] = string.Join("\n", config.PalComChatAliases ?? [])
             })
         );
     }

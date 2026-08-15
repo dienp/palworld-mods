@@ -17,6 +17,7 @@ public sealed record PalworldConfig
     public int LiveBridgeTimeoutMilliseconds { get; init; } = 5000;
     public bool PalComChatEnabled { get; init; }
     public string PalComChatPrefix { get; init; } = "Hey PalCom,";
+    public string[] PalComChatAliases { get; init; } = ["PalCom,", "Pal,", "PC,"];
     public string PalComCodexExecutable { get; init; } = "codex.exe";
     public string? PalComWorkspace { get; init; }
     public string PalComPrimaryModel { get; init; } = "gpt-5.6-sol";

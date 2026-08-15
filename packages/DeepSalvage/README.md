@@ -1,26 +1,22 @@
-# Deep Salvage
+# More Fishing Salvage Reward
 
-A server-only Lua Palworld gameplay mod that occasionally turns vanilla
-fishing salvage into a higher-cost, higher-reward Deep Salvage attempt for
-every connected client.
+A server-only Lua Palworld mod that increases fishing salvage rewards for
+every connected player.
 
 ## Behavior
 
-Deep Salvage does not add another interaction. The normal **Salvage** action
-remains unchanged in the UI.
+The normal **Salvage** action remains unchanged.
 
-One authoritative configurable roll occurs when a fishing-salvage attempt
-opens:
+For each eligible fishing salvage attempt:
 
-- A selected roll requires one additional Fishing Magnet of the matching
-  salvage rank.
-- The same selected attempt receives a reward bonus if it succeeds.
+- One extra Fishing Magnet of the matching rank is used.
+- A successful salvage grants 200% total estimated base reward.
+- Any active Jellroy multiplier is applied after the reward increase.
 
-The modifier applies to 100% of eligible salvage attempts. Each attempt costs
-two magnets in total (one vanilla plus one Deep Salvage cost) and receives +100% of the
-estimated base reward quantity while preserving any active Jellroy bonus.
+The current configuration applies this to 100% of eligible attempts, so each
+attempt uses two magnets in total: one vanilla cost and one extra cost.
 
-Production build `1.0.3` uses the 100% modifier chance with runtime
+Production build `1.0.5` increases rewards on every eligible attempt, with runtime
 diagnostics disabled.
 
 ## Notification delivery
@@ -43,16 +39,15 @@ selected, not to whoever runs the server.
 
 - No native DLL or cooked asset is distributed.
 - No interaction-interface hooks are registered.
-- Deep Salvage consumes exactly one additional rank-matched Fishing Magnet.
+- The mod consumes exactly one additional rank-matched Fishing Magnet.
 - No chat or RPC control protocol is used. The default build sends no chat
   message; the opt-in remote notification is one outbound whisper to the
   salvaging player and accepts no inbound commands.
 - Clients do not install the mod.
-- No UI is changed except one notification to the salvaging player when a Deep
-  Salvage attempt successfully activates.
+- No UI is changed except one notification when the extra reward activates.
 - Reward changes are limited to fishing-junk salvage models identified by
   their runtime object or owner name.
-- The modifier fails closed without consuming anything unless the player has
+- The extra reward does not activate or consume anything unless the player has
   at least two matching magnets and the server can resolve their inventory.
 - Runtime diagnostics remain available through configuration.
 

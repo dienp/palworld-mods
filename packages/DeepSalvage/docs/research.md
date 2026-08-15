@@ -2,7 +2,7 @@
 
 ## Current design
 
-Deep Salvage is a server-only Lua mod. It preserves the vanilla
+More Fishing Salvage Reward is a server-only Lua mod. It preserves the vanilla
 fishing-salvage interaction and rolls one optional modifier per authoritative
 attempt in `PalMapObjectTreasureBoxModel:RequestOpen_ServerInternal`.
 
@@ -16,6 +16,15 @@ The server component must be proven to provide or replicate the values used by
 an unmodded remote client's minigame. If it does not, server-only difficulty is
 not viable through this Lua surface and must fail closed; server-authoritative
 reward modification remains viable.
+
+## Hot reload
+
+The installed UE4SS runtime supports live Lua deployment with
+`EnableAutoReloadingLuaMods = 1`. Updating the installed `Scripts/main.lua`
+while Palworld is running cleanly stops `DeepSalvage`, unregisters its existing
+hooks, reloads the mod, and registers fresh hooks. Hot deployment must update
+the runtime-installed copy only; do not overwrite the subscribed Workshop
+source while Palworld is running.
 
 ## Notification ownership
 
@@ -40,10 +49,10 @@ receiver id or the game state cannot be resolved.
 
 Palworld exposes the Jellroy fishing-salvage passive through
 `EPalPassiveSkillEffectType::FishingSalvage_ItemDrop`. The Lua implementation
-estimates the base quantity from the already adjusted vanilla quantity, then
-adds the configured random bonus alongside the Jellroy bonus:
+estimates the base quantity from the already adjusted vanilla quantity, applies
+the configured reward bonus, and applies Jellroy last:
 
-`final = round(base × (1 + Jellroy bonus + random bonus))`
+`final = round((base × (1 + reward bonus)) × Jellroy multiplier)`
 
 Every modified stack is audited in diagnostics. If live evidence shows that
 base inference differs from Palworld's loot calculation, the reward modifier

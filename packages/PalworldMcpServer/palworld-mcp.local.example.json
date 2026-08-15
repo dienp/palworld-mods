@@ -9,5 +9,19 @@
   "liveBridgeEnabled": false,
   "liveBridgeWriteEnabled": true,
   "liveBridgeDirectory": null,
-  "liveBridgeTimeoutMilliseconds": 5000
+  "liveBridgeTimeoutMilliseconds": 5000,
+  "palComChatEnabled": false,
+  "palComChatPrefix": "Hey PalCom,",
+  "palComChatAliases": ["PalCom,", "Pal,", "PC,"],
+  "palComCodexExecutable": "codex.exe",
+  "palComWorkspace": null,
+  "palComPrimaryModel": "gpt-5.6-sol",
+  "palComFallbackModels": ["gpt-5.5"],
+  "palComModelReasoningEffort": "low",
+  "palComMcpEnabled": false,
+  "palComMcpServerExecutable": null,
+  "palComMcpConfigPath": null,
+  "palComTimeoutMilliseconds": 60000,
+  "palComMaximumPromptLength": 500,
+  "palComMaximumResponseLength": 1200
 }

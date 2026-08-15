@@ -36,4 +36,46 @@ public sealed class PalComChatAgentTests
         Assert.DoesNotContain('\n', response);
         Assert.EndsWith("...", response);
     }
+
+    [TestMethod]
+    public void DefaultCodexNameResolvesNewestDesktopCli()
+    {
+        var localRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"palcom-codex-resolution-{Guid.NewGuid():N}"
+        );
+        var older = Path.Combine(localRoot, "OpenAI", "Codex", "bin", "older", "codex.exe");
+        var newer = Path.Combine(localRoot, "OpenAI", "Codex", "bin", "newer", "codex.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(older)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(newer)!);
+        File.WriteAllBytes(older, []);
+        File.WriteAllBytes(newer, []);
+        File.SetLastWriteTimeUtc(older, DateTime.UtcNow.AddMinutes(-1));
+        File.SetLastWriteTimeUtc(newer, DateTime.UtcNow);
+        try
+        {
+            Assert.AreEqual(
+                newer,
+                PalComChatAgentService.ResolveCodexExecutable(
+                    "codex.exe",
+                    localRoot
+                )
+            );
+        }
+        finally
+        {
+            Directory.Delete(localRoot, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void ExplicitCodexPathIsPreserved()
+    {
+        var configured = Path.GetFullPath(@"C:\Tools\codex.exe");
+
+        Assert.AreEqual(
+            configured,
+            PalComChatAgentService.ResolveCodexExecutable(configured)
+        );
+    }
 }

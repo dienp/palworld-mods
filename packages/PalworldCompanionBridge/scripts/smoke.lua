@@ -65,6 +65,25 @@ if not loaded then
     muted_print("smoke: load failed: " .. tostring(load_error))
     os.exit(1)
 end
+
+local source_file = io.open(entry_point, "rb")
+check(source_file ~= nil, "could not inspect the bridge guidance text")
+if source_file ~= nil then
+    local source = source_file:read("a")
+    source_file:close()
+    for _, guidance in ipairs({
+        "liveBridgeEnabled=true",
+        "palComChatEnabled=true",
+        "palcom_prefixes",
+        "%LOCALAPPDATA%\\\\PalworldCompanionBridge\\\\palcom-launch.cmd",
+        "palworld-mcp-server.exe --palcom-agent",
+    }) do
+        check(
+            string.find(source, guidance, 1, true) ~= nil,
+            "bridge guidance is missing " .. guidance
+        )
+    end
+end
 check(type(scheduled_tick) == "function", "the mod registered no scheduler")
 if type(scheduled_tick) ~= "function" then
     muted_print("smoke: " .. failures[1])

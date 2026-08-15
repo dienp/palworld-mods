@@ -3,7 +3,7 @@
 ## Build
 
 - Game revision: 82182 or newer
-- Build version: `1.0.3`
+- Build version: `1.0.5`
 - Mod type: Lua
 - Deployment: server only; clients must not install the mod
 
@@ -24,7 +24,7 @@ Require successful registration for:
 Confirm `event=mod_loaded` reports `deployment=server-only` and the configured
 modifier chance. No native `DeepSalvageNativeProof` mod may load.
 
-## Deep Salvage cost
+## Extra magnet cost
 
 Use a temporary `modifier_chance = 1.0` server configuration:
 
@@ -44,9 +44,9 @@ is consumed.
 Run a listen server with the host and at least one remote client, using
 `modifier_chance = 1.0`:
 
-1. Salvage as the host. Confirm the host sees the activation notification and
-   that `event=deep_salvage_notification | target=host | delivered=true` is
-   logged.
+1. Salvage as the host. Confirm the host sees the activation notification,
+   that it disappears within three seconds, and that
+   `event=deep_salvage_notification | target=host | delivered=true` is logged.
 2. Salvage as the remote client with `remote_notification_via_chat = false`.
    Confirm the host sees no notification and that
    `event=deep_salvage_notification | target=remote | delivered=false |
@@ -71,11 +71,11 @@ Use `modifier_chance = 1.0` and succeed:
 3. Require `event=reward_formula_summary | formula_match=true`.
 4. Confirm the final quantity follows:
 
-   `final = round(base × (1 + Jellroy bonus + configured reward bonus))`
+   `final = round((base × (1 + configured reward bonus)) × Jellroy multiplier)`
 5. Confirm one `reward_formula_summary` debug notification displays each
    stack as:
 
-   `base reward -> vanilla reward after Jellroy -> final modified reward`
+   `base reward -> reward after mod bonus -> Jellroy multiplier -> final reward`
 
 Repeat with `modifier_chance = 0.0` and confirm no reward stack is changed.
 Confirm failed and cancelled attempts grant no items.

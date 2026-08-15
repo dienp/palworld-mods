@@ -1,0 +1,7 @@
+[h1]Palworld Companion Bridge (Experimental)[/h1]
+
+Connects Palworld to local AI assistants such as ChatGPT and Claude through the PalCom companion server.
+
+Use [b]Hey PalCom,[/b] in chat for private answers, inspect your bases and Pals, and access experimental allowlisted management tools. Communication stays on your machine and opens no network port.
+
+Requires UE4SS Experimental and the local [url=https://github.com/dienp/palworld-mods]Palworld MCP/PalCom server[/url].

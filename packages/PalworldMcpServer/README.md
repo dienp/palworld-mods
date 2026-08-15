@@ -161,6 +161,11 @@ The companion bridge can intercept a local-player chat message such as
 the answer through private local notifications. The agent runs out of process,
 so Codex never blocks Palworld's game thread.
 
+The primary prefix and aliases are case-insensitive. Defaults are
+`Hey PalCom,`, `PalCom,`, `Pal,`, and `PC,`; every phrase keeps the trailing
+comma to reduce accidental matches. Customize or clear the aliases with
+`palComChatAliases`.
+
 This feature is opt-in. Add the following fields to
 `palworld-mcp.local.json`. The normal MCP server provisions a fixed launcher
 under `%LOCALAPPDATA%\PalworldCompanionBridge`; the Lua bridge uses it to start
@@ -173,6 +178,7 @@ also launch the broker manually with
   "liveBridgeEnabled": true,
   "palComChatEnabled": true,
   "palComChatPrefix": "Hey PalCom,",
+  "palComChatAliases": ["PalCom,", "Pal,", "PC,"],
   "palComCodexExecutable": "codex.exe",
   "palComPrimaryModel": "gpt-5.6-sol",
   "palComFallbackModels": ["gpt-5.5"],
@@ -193,6 +199,11 @@ server's idempotency, verification, rollback, and audit controls. The primary
 model is `gpt-5.6-sol`; configured fallbacks are tried in order when it fails.
 It keeps up to six recent exchanges in broker memory for conversational
 continuity, but does not persist the transcript.
+
+When `palComCodexExecutable` is `codex.exe`, the server prefers the newest
+user-local Codex Desktop CLI under `%LOCALAPPDATA%\OpenAI\Codex\bin`. This
+avoids the WindowsApps alias, which background broker processes may be unable
+to execute. Set an absolute path to override automatic resolution.
 
 The broker blocks on a coalescing `FileSystemWatcher` channel instead of polling
 for requests. It renews a 15-second readiness lease every five seconds; this is
