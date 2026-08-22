@@ -275,7 +275,7 @@ The `package` target creates:
 packages/PalworldMcpServer/dist/
   artifact-manifest.json
   SHA256SUMS.txt
-  palworld-mcp-server-v0.9.6-win-x64.zip
+  palworld-mcp-server-v0.9.7-win-x64.zip
 ```
 
 The ZIP contains a self-contained `palworld-mcp-server.exe`, the example
@@ -318,7 +318,7 @@ For the self-contained release, configure the MCP host to run the EXE directly:
 
 ```toml
 [mcp_servers.palworld]
-command = "C:\\Tools\\palworld-mcp-server-v0.9.6-win-x64\\palworld-mcp-server.exe"
+command = "C:\\Tools\\palworld-mcp-server-v0.9.7-win-x64\\palworld-mcp-server.exe"
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 ```
@@ -329,7 +329,7 @@ required.
 After downloading a release, compare its checksum before extracting:
 
 ```powershell
-Get-FileHash .\palworld-mcp-server-v0.9.6-win-x64.zip -Algorithm SHA256
+Get-FileHash .\palworld-mcp-server-v0.9.7-win-x64.zip -Algorithm SHA256
 ```
 
 The resulting hash must match the entry published in `SHA256SUMS.txt`.
@@ -345,6 +345,10 @@ under `PalworldMcpServer/src` or the bundled bridge Lua `Scripts` directory
 changes. Documentation, tests, workflow, thumbnails, and packaging-only
 changes do not publish a release. The manual trigger can still publish when
 `publish_release` is explicitly enabled.
+
+Publishing fails early with an actionable version-bump error if the release
+tag already exists. Same-version release jobs are serialized, and every new
+release tag targets the exact commit whose artifact passed the workflow.
 
 Before any public release, resolve the `libooz.dll` redistribution note in
 `THIRD-PARTY-NOTICES.md`.

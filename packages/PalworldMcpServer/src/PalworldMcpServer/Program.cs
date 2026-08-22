@@ -34,7 +34,7 @@ else
                 Version = typeof(PalworldTools).Assembly
                     .GetName()
                     .Version?
-                    .ToString(3) ?? "0.9.6"
+                    .ToString(3) ?? "0.9.7"
             };
             options.ServerInstructions =
                 "Palworld save advisor and live companion. Call get_status first. " +

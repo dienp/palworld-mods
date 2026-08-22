@@ -108,6 +108,28 @@ jobs:
           }
           "value=$version" >> $env:GITHUB_OUTPUT
 
+      - name: Guard release version
+        if: >-
+          (github.event_name == 'push' &&
+           github.ref == 'refs/heads/main' &&
+           steps.release_changes.outputs.value == 'true') ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: palworld-mcp-v${{ steps.version.outputs.value }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseOutput = gh release view $env:TAG `
+            --repo "${{ github.repository }}" 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $env:TAG already exists. Increment the MCP version before publishing another runtime build."
+          }
+          if ($releaseOutput -notmatch 'release not found') {
+            throw "Unable to verify that $env:TAG is available: $releaseOutput"
+          }
+          Write-Host "Release tag $env:TAG is available."
+
       - name: Bootstrap PalCalc
         shell: pwsh
         working-directory: packages/PalworldMcpServer
@@ -153,6 +175,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: palworld-mcp-release-${{ needs.build.outputs.version }}
+      cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -163,9 +188,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: palworld-mcp-v${{ needs.build.outputs.version }}
-        run: >
-          gh release create "$TAG"
-          release/*
-          --repo "${{ github.repository }}"
-          --title "Palworld MCP Server v${{ needs.build.outputs.version }}"
-          --generate-notes
+        run: |
+          set -euo pipefail
+          set +e
+          release_output=$(gh release view "$TAG" --repo "${{ github.repository }}" 2>&1)
+          release_status=$?
+          set -e
+          if [[ $release_status -eq 0 ]]; then
+            echo "::error::Release $TAG already exists. Increment the MCP version before publishing another runtime build."
+            exit 1
+          fi
+          if [[ $release_output != *"release not found"* ]]; then
+            echo "::error::Unable to verify that $TAG is available: $release_output"
+            exit 1
+          fi
+          gh release create "$TAG" \
+            release/* \
+            --repo "${{ github.repository }}" \
+            --title "Palworld MCP Server v${{ needs.build.outputs.version }}" \
+            --target "${{ github.sha }}" \
+            --generate-notes

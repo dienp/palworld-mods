@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.9.6"
+    [string]$Version = "0.9.7"
 )
 
 $ErrorActionPreference = "Stop"
@@ -80,13 +80,35 @@ $bridgeDestination = Join-Path $stagingRoot `
 if (-not (Test-Path -LiteralPath $bridgeSource)) {
     throw "The Palworld Companion Bridge payload was not found at $bridgeSource."
 }
+$bridgeInfoPath = Join-Path $bridgeSource "Info.json"
+if (-not (Test-Path -LiteralPath $bridgeInfoPath)) {
+    throw "The Palworld Companion Bridge metadata was not found at $bridgeInfoPath."
+}
+$bridgeInfo = Get-Content -LiteralPath $bridgeInfoPath -Raw | ConvertFrom-Json
+$bridgeVersion = [string]$bridgeInfo.Version
+if ([string]::IsNullOrWhiteSpace($bridgeVersion)) {
+    throw "The Palworld Companion Bridge metadata does not contain a version."
+}
 New-Item -ItemType Directory -Path (Split-Path $bridgeDestination) -Force |
     Out-Null
 Copy-Item -LiteralPath $bridgeSource -Destination $bridgeDestination -Recurse
 
 Compress-Archive -LiteralPath $stagingRoot -DestinationPath $archivePath -CompressionLevel Optimal
 
-$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$archiveStream = [System.IO.File]::OpenRead($archivePath)
+try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $archiveHash = -join @(
+            $sha256.ComputeHash($archiveStream) |
+                ForEach-Object { $_.ToString("x2") }
+        )
+    } finally {
+        $sha256.Dispose()
+    }
+} finally {
+    $archiveStream.Dispose()
+}
 "$archiveHash  $([System.IO.Path]::GetFileName($archivePath))" |
     Set-Content -LiteralPath $checksumPath -Encoding ascii
 
@@ -97,7 +119,7 @@ $manifest = [ordered]@{
     minimumWindowsVersion = "10.0.17763.0"
     selfContained = $true
     palCalcVersion = "1.19.1"
-    companionBridgeVersion = "0.1.0-dev.115"
+    companionBridgeVersion = $bridgeVersion
     executable = "palworld-mcp-server.exe"
     sha256 = $archiveHash
 }
